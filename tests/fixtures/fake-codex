@@ -1,0 +1,32 @@
+#!/usr/bin/env node
+
+import { createInterface } from "node:readline";
+
+if (process.argv.includes("--version")) {
+  process.stdout.write("fake-codex 1.0.0\n");
+  process.exit(0);
+}
+
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  if (message.method === "initialize") {
+    process.stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+    return;
+  }
+  if (message.method === "environment/read") {
+    process.stdout.write(
+      `${JSON.stringify({
+        id: message.id,
+        result: { runnerToken: process.env.RUNNER_TOKEN ?? null },
+      })}\n`,
+    );
+    return;
+  }
+  if (message.method === "crash") {
+    process.exit(17);
+  }
+  process.stdout.write(
+    `${JSON.stringify({ id: message.id, result: message.params ?? {} })}\n`,
+  );
+});
