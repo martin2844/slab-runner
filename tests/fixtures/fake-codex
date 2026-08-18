@@ -18,7 +18,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     process.stdout.write(
       `${JSON.stringify({
         id: message.id,
-        result: { runnerToken: process.env.RUNNER_TOKEN ?? null },
+        result: {
+          runnerToken: process.env.RUNNER_TOKEN ?? null,
+          codexHome: process.env.CODEX_HOME ?? null,
+          argv: process.argv.slice(2),
+        },
       })}\n`,
     );
     return;

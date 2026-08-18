@@ -55,9 +55,16 @@ The default address is `http://127.0.0.1:6990`. Slab Runner refuses non-loopback
 | `RUNNER_HOST` | `127.0.0.1` | Listening interface; only `127.0.0.1`, `::1`, or `localhost` are accepted |
 | `RUNNER_PORT` | `6990` | Listening port |
 | `CODEX_BIN` | `codex` | Codex executable path or name |
+| `RUNNER_CODEX_HOME` | `~/.local/state/slab-runner/codex` | Dedicated persistent Codex state used only by Slab Runner |
 | `RUNNER_TOKEN` | unset | Optional local bearer token, minimum 16 characters |
 
 When `RUNNER_TOKEN` is set, every operational endpoint accepts either `Authorization: Bearer <token>` or `X-Runner-Token: <token>`. `GET /health` remains available for local health probes.
+
+Runner starts Codex with `RUNNER_CODEX_HOME`, not the user's primary
+`~/.codex` directory. On first startup it copies file-based Codex
+authentication into that private directory and writes a managed config without
+MCP servers. Work, Docs, and integration MCP definitions are supplied per run by
+the control plane, so global Codex MCP entries cannot become agent tools.
 
 ## HTTP API
 
@@ -137,7 +144,7 @@ The response is immediate:
 { "runId": "run_123", "status": "running" }
 ```
 
-Only `work` and `docs` are accepted as MCP server names in the MVP. Credentials are forwarded to Codex as MCP HTTP headers, held in memory for the active run, and redacted from normalized events and logs.
+Only the control-plane server names `work`, `docs`, and `posthog` are accepted in the MVP. Credentials are forwarded to Codex as MCP HTTP headers, held in memory for the active run, and redacted from normalized events and logs.
 
 For a new thread, omit `runtimeThreadId` or set it to `null`. Runner emits `thread.created`; the control plane must store its `runtimeThreadId` and send it with the next run. Runner never becomes the source of truth for that mapping.
 

@@ -10,6 +10,7 @@ describe("parseExecutionRequest", () => {
         name: "COO",
         role: "Operations",
         instructions: "Classify work.",
+        fullAccess: true,
       },
       runtime: { type: "codex", model: null },
       thread: { runtimeThreadId: null },
@@ -28,6 +29,7 @@ describe("parseExecutionRequest", () => {
       "Bearer secret-value",
     );
     expect(request.context).toEqual([]);
+    expect(request.agent.fullAccess).toBe(true);
   });
 
   it("accepts the current control-plane aliases without exposing them downstream", () => {
@@ -58,6 +60,34 @@ describe("parseExecutionRequest", () => {
       agent: { id: "Sales" },
     });
     expect(request.mcpServers[0]?.name).toBe("docs");
+    expect(request.agent.fullAccess).toBe(false);
+  });
+
+  it("accepts a PostHog MCP tool server from the control plane", () => {
+    const request = parseExecutionRequest({
+      runId: "run-posthog",
+      agent: {
+        id: "coo",
+        name: "COO",
+        role: "Operations",
+        instructions: "Use analytics evidence.",
+      },
+      runtime: { type: "codex", model: null },
+      thread: { runtimeThreadId: null },
+      message: "Review activation",
+      mcpServers: [
+        {
+          name: "posthog",
+          url: "http://127.0.0.1:3009/api/integrations/posthog/mcp",
+          credentials: { bearerToken: "local-mcp-token" },
+        },
+      ],
+    });
+
+    expect(request.mcpServers[0]).toMatchObject({
+      name: "posthog",
+      headers: { Authorization: "Bearer local-mcp-token" },
+    });
   });
 
   it.each([

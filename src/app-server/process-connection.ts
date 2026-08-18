@@ -45,6 +45,7 @@ export class ProcessAppServerConnection extends BaseAppServerConnection {
   constructor(
     private readonly codexBin: string,
     private readonly logger: Logger,
+    private readonly codexHome: string,
   ) {
     super();
   }
@@ -130,7 +131,7 @@ export class ProcessAppServerConnection extends BaseAppServerConnection {
     if (!this.#desired) return;
     const child = spawn(
       this.codexBin,
-      ["app-server", "--stdio", "-c", "mcp_servers={}"],
+      ["app-server", "--stdio"],
       {
         stdio: ["pipe", "pipe", "pipe"],
         env: this.runtimeEnvironment(),
@@ -185,6 +186,7 @@ export class ProcessAppServerConnection extends BaseAppServerConnection {
     return new Promise((resolve, reject) => {
       const child = spawn(this.codexBin, ["--version"], {
         stdio: "ignore",
+        env: this.runtimeEnvironment(),
       });
       const timeout = setTimeout(() => {
         child.kill("SIGTERM");
@@ -225,6 +227,7 @@ export class ProcessAppServerConnection extends BaseAppServerConnection {
   private runtimeEnvironment(): NodeJS.ProcessEnv {
     const environment = { ...process.env };
     delete environment.RUNNER_TOKEN;
+    environment.CODEX_HOME = this.codexHome;
     return environment;
   }
 

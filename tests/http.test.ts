@@ -66,6 +66,7 @@ const validBody = {
     name: "COO",
     role: "Operations",
     instructions: "Operate.",
+    fullAccess: false,
   },
   runtime: { type: "codex", model: null },
   thread: { runtimeThreadId: null },

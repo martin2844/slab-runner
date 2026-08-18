@@ -33,6 +33,10 @@ class FakeRuntimeAdapter implements RuntimeAdapter {
     return Promise.resolve({ id: this.id, available: this.available });
   }
 
+  contextProfile() {
+    return { runtime: "codex", initialUserInput: { approxTokens: 4 } };
+  }
+
   startThread(): Promise<string> {
     return this.threadStart();
   }
@@ -88,12 +92,13 @@ describe("RunManager", () => {
     expect(stream.terminal).toBe(true);
     expect(stream.events.map(({ type }) => type)).toEqual([
       "run.started",
+      "context.bootstrap",
       "thread.created",
       "assistant.delta",
       "assistant.completed",
       "run.completed",
     ]);
-    expect(stream.events.map(({ id }) => id)).toEqual([1, 2, 3, 4, 5]);
+    expect(stream.events.map(({ id }) => id)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it("resumes a mapped thread without emitting thread.created", async () => {
@@ -108,10 +113,34 @@ describe("RunManager", () => {
     expect(types).not.toContain("thread.created");
   });
 
+  it("creates distinct runtime threads for consecutive fresh runs", async () => {
+    const { adapter, manager } = managerWith();
+    let threadIndex = 0;
+    adapter.threadStart = () =>
+      Promise.resolve(`thread-fresh-${(threadIndex += 1)}`);
+
+    manager.create(executionRequest({ runId: "run-fresh-1" }));
+    manager.create(executionRequest({ runId: "run-fresh-2" }));
+    await vi.waitFor(() =>
+      expect(manager.status("run-fresh-2")).toBe("completed"),
+    );
+
+    const createdIds = ["run-fresh-1", "run-fresh-2"].map(
+      (runId) =>
+        manager
+          .openEventStream(runId, 0, () => {})
+          .events.find(({ type }) => type === "thread.created")?.data
+          .runtimeThreadId,
+    );
+    expect(createdIds).toEqual(["thread-fresh-1", "thread-fresh-2"]);
+  });
+
   it("normalizes runtime failures without returning a stack", async () => {
     const { adapter, manager } = managerWith();
     adapter.turn = () =>
-      Promise.reject(new Error("upstream failed with private internal details"));
+      Promise.reject(
+        new Error("upstream failed with private internal details"),
+      );
     manager.create(executionRequest());
     await vi.waitFor(() => expect(manager.status("run-1")).toBe("failed"));
     const failed = manager
@@ -147,7 +176,12 @@ describe("RunManager", () => {
       manager
         .openEventStream("run-1", 0, () => {})
         .events.map(({ type }) => type),
-    ).toEqual(["run.started", "thread.created", "run.cancelled"]);
+    ).toEqual([
+      "run.started",
+      "context.bootstrap",
+      "thread.created",
+      "run.cancelled",
+    ]);
   });
 
   it("tracks approval waiting state and forwards the decision", async () => {

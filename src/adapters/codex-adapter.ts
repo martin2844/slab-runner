@@ -6,16 +6,19 @@ import type {
   RpcServerRequest,
 } from "../app-server/connection.js";
 import { collectHeaderSecrets, type Redactor } from "../lib/redactor.js";
+import {
+  approxTokens,
+  measurePayload,
+  measureText,
+  summarizeSearchTool,
+} from "../lib/observability.js";
 import type {
   RuntimeAdapter,
   RuntimeEventSink,
   RuntimeHealth,
   RuntimeTurnContext,
 } from "../runtime/adapter.js";
-import {
-  normalizeRuntimeError,
-  RunnerError,
-} from "../runtime/errors.js";
+import { normalizeRuntimeError, RunnerError } from "../runtime/errors.js";
 import type {
   AgentExecutionRequest,
   McpServerDefinition,
@@ -34,6 +37,17 @@ interface ActiveRun {
   turnId: string | null;
   emit: RuntimeEventSink;
   redactor: Redactor;
+  fullAccess: boolean;
+  usageCallIndex: number;
+  toolStarts: Map<
+    string,
+    {
+      startedAt: string;
+      timestampMs: number;
+      data: Record<string, unknown>;
+    }
+  >;
+  terminalToolIds: Set<string>;
   approvals: Map<string, NativeApproval>;
   approvalsByNativeId: Map<string, string>;
   resolve(): void;
@@ -54,17 +68,53 @@ const TOOL_ITEM_TYPES = new Set([
   "imageGeneration",
 ]);
 
+const READ_ONLY_MCP_TOOLS: Record<string, readonly string[]> = {
+  work: [
+    "list_projects",
+    "get_project",
+    "list_issues",
+    "get_issue",
+    "search_issues",
+    "list_comments",
+    "list_links",
+    "get_blocked_issues",
+    "get_issue_history",
+  ],
+  docs: [
+    "list_docs",
+    "search_docs",
+    "get_doc",
+    "list_doc_revisions",
+    "get_doc_revision",
+  ],
+  posthog: ["list_projects", "query_analytics"],
+};
+
+const MCP_SERVER_ALIASES: Record<string, keyof typeof READ_ONLY_MCP_TOOLS> = {
+  work: "work",
+  slab: "work",
+  docs: "docs",
+  "slab-docs": "docs",
+  posthog: "posthog",
+};
+
 export class CodexAdapter implements RuntimeAdapter {
   readonly id = "codex";
   readonly #runs = new Map<string, ActiveRun>();
   readonly #runByThread = new Map<string, ActiveRun>();
+  readonly #captureFullToolPayloads =
+    process.env.RUNNER_OBSERVABILITY_FULL_PAYLOADS === "true";
 
   constructor(
     private readonly connection: AppServerConnection,
     private readonly safeCwd: string,
   ) {
-    connection.on("notification", (message) => this.handleNotification(message));
-    connection.on("serverRequest", (message) => this.handleServerRequest(message));
+    connection.on("notification", (message) =>
+      this.handleNotification(message),
+    );
+    connection.on("serverRequest", (message) =>
+      this.handleServerRequest(message),
+    );
     connection.on("crash", () => this.handleCrash());
   }
 
@@ -137,6 +187,10 @@ export class CodexAdapter implements RuntimeAdapter {
       redactor: collectHeaderSecrets(
         context.request.mcpServers.map(({ headers }) => headers),
       ),
+      fullAccess: context.request.agent.fullAccess,
+      usageCallIndex: 0,
+      toolStarts: new Map(),
+      terminalToolIds: new Set(),
       approvals: new Map(),
       approvalsByNativeId: new Map(),
       resolve: complete,
@@ -223,6 +277,68 @@ export class CodexAdapter implements RuntimeAdapter {
     await this.connection.stop();
   }
 
+  contextProfile(request: AgentExecutionRequest): Record<string, unknown> {
+    const developerInstructions = this.buildDeveloperInstructions(request);
+    const turnInput = this.buildTurnMessage(request);
+    const suppliedInstructions = request.agent.instructions;
+    const initialUserInput = request.message;
+    const contextOnly = request.context
+      .map(({ role, body }) => `${role.toUpperCase()}: ${body}`)
+      .join("\n\n");
+    const mcpConfiguration = this.mcpConfig(
+      request.mcpServers,
+      request.agent.fullAccess,
+    );
+    const safeConfiguration = {
+      mcp_servers: Object.fromEntries(
+        request.mcpServers.map(({ name, url, headers }) => [
+          name,
+          {
+            url,
+            headerNames: Object.keys(headers).sort(),
+          },
+        ]),
+      ),
+    };
+    const metric = (value: string) => ({
+      bytes: Buffer.byteLength(value, "utf8"),
+      approxTokens: approxTokens(value.length),
+    });
+    const configText = JSON.stringify(mcpConfiguration);
+    const safeConfigText = JSON.stringify(safeConfiguration);
+
+    return {
+      runtime: this.id,
+      estimator: "characters_divided_by_4",
+      developerInstructionsTotal: metric(developerInstructions),
+      agentInstructionsProvided: metric(suppliedInstructions),
+      runnerGeneratedInstructionsApprox: {
+        bytes: Math.max(
+          0,
+          Buffer.byteLength(developerInstructions, "utf8") -
+            Buffer.byteLength(suppliedInstructions, "utf8"),
+        ),
+        approxTokens: Math.max(
+          0,
+          approxTokens(developerInstructions.length) -
+            approxTokens(suppliedInstructions.length),
+        ),
+      },
+      turnInputTotal: metric(turnInput),
+      initialUserInput: metric(initialUserInput),
+      rehydratedConversationContextApprox: {
+        ...metric(contextOnly),
+        messageCount: request.context.length,
+      },
+      mcpConfiguration: {
+        bytes: Buffer.byteLength(configText, "utf8"),
+        approxTokens: approxTokens(configText.length),
+        safeConfigurationBytes: Buffer.byteLength(safeConfigText, "utf8"),
+        serverCount: request.mcpServers.length,
+      },
+    };
+  }
+
   private assertAvailable(): void {
     if (!this.connection.ready) {
       throw new RunnerError(
@@ -233,7 +349,9 @@ export class CodexAdapter implements RuntimeAdapter {
     }
   }
 
-  private threadParams(request: AgentExecutionRequest): Record<string, unknown> {
+  private threadParams(
+    request: AgentExecutionRequest,
+  ): Record<string, unknown> {
     return {
       ...(request.runtime.model ? { model: request.runtime.model } : {}),
       cwd: request.cwd ?? this.safeCwd,
@@ -241,12 +359,13 @@ export class CodexAdapter implements RuntimeAdapter {
       sandbox: "read-only",
       serviceName: "slab_runner",
       developerInstructions: this.buildDeveloperInstructions(request),
-      config: this.mcpConfig(request.mcpServers),
+      config: this.mcpConfig(request.mcpServers, request.agent.fullAccess),
     };
   }
 
   private mcpConfig(
     servers: McpServerDefinition[],
+    fullAccess: boolean,
   ): Record<string, unknown> {
     return {
       mcp_servers: Object.fromEntries(
@@ -257,7 +376,17 @@ export class CodexAdapter implements RuntimeAdapter {
             http_headers: headers,
             enabled: true,
             required: true,
-            default_tools_approval_mode: "auto",
+            default_tools_approval_mode: fullAccess ? "approve" : "prompt",
+            ...(!fullAccess && READ_ONLY_MCP_TOOLS[name]
+              ? {
+                  tools: Object.fromEntries(
+                    READ_ONLY_MCP_TOOLS[name].map((tool) => [
+                      tool,
+                      { approval_mode: "approve" },
+                    ]),
+                  ),
+                }
+              : {}),
           },
         ]),
       ),
@@ -328,7 +457,9 @@ export class CodexAdapter implements RuntimeAdapter {
         if (typeof params.delta === "string") {
           run.emit("assistant.delta", {
             delta: run.redactor.text(params.delta),
-            ...(typeof params.itemId === "string" ? { itemId: params.itemId } : {}),
+            ...(typeof params.itemId === "string"
+              ? { itemId: params.itemId }
+              : {}),
           });
         }
         break;
@@ -340,13 +471,39 @@ export class CodexAdapter implements RuntimeAdapter {
         this.handleItem(run, params, "completed");
         break;
       case "thread/tokenUsage/updated":
-        run.emit("usage.updated", this.safeRecord(run, params.tokenUsage));
+        this.handleUsageUpdated(run, params.tokenUsage);
         break;
       case "error": {
+        const rawError = params.error;
+        const error = this.record(rawError);
+        const message =
+          typeof error.message === "string"
+            ? error.message
+            : typeof rawError === "string"
+              ? rawError
+              : typeof params.message === "string"
+                ? params.message
+                : "Codex runtime reported an error.";
+        run.emit(
+          "runtime.warning",
+          this.safeRecord(run, {
+            message: message.slice(0, 500),
+            ...(typeof error.code === "string" ? { code: error.code } : {}),
+            ...(typeof error.type === "string" ? { type: error.type } : {}),
+            willRetry: params.willRetry === true,
+            timestamp: new Date().toISOString(),
+            ...(typeof params.itemId === "string"
+              ? { itemId: params.itemId }
+              : typeof error.itemId === "string"
+                ? { itemId: error.itemId }
+                : {}),
+          }),
+        );
         if (params.willRetry !== true) {
-          const error = this.record(params.error);
           run.lastError =
-            typeof error.message === "string" ? error.message : "Runtime turn failed";
+            typeof error.message === "string"
+              ? error.message
+              : "Runtime turn failed";
         }
         break;
       }
@@ -365,7 +522,10 @@ export class CodexAdapter implements RuntimeAdapter {
     const type = item.type;
     if (type === "agentMessage" && lifecycle === "completed") {
       const phase = item.phase;
-      if ((phase === "final_answer" || phase === null) && typeof item.text === "string") {
+      if (
+        (phase === "final_answer" || phase === null) &&
+        typeof item.text === "string"
+      ) {
         run.emit("assistant.completed", {
           message: run.redactor.text(item.text),
           ...(typeof item.id === "string" ? { itemId: item.id } : {}),
@@ -374,26 +534,179 @@ export class CodexAdapter implements RuntimeAdapter {
       return;
     }
     if (typeof type !== "string" || !TOOL_ITEM_TYPES.has(type)) return;
+    const toolId = typeof item.id === "string" ? item.id : "unknown";
+    const observedAt = new Date();
+    if (lifecycle === "started") {
+      if (run.toolStarts.has(toolId)) return;
+      run.terminalToolIds.delete(toolId);
+      run.toolStarts.set(toolId, {
+        startedAt: observedAt.toISOString(),
+        timestampMs: observedAt.getTime(),
+        data: {},
+      });
+    } else if (run.terminalToolIds.has(toolId)) {
+      return;
+    }
+    const trackedStart = run.toolStarts.get(toolId);
+    const reportedDuration =
+      typeof item.durationMs === "number" ? item.durationMs : null;
+    const durationMs =
+      reportedDuration ??
+      (lifecycle === "completed" && trackedStart
+        ? Math.max(0, observedAt.getTime() - trackedStart.timestampMs)
+        : null);
+    const server =
+      type === "mcpToolCall" && typeof item.server === "string"
+        ? item.server
+        : "runtime";
+    const tool = this.toolIdentifier(item);
+    const argumentsValue = this.toolArguments(item);
+    const responseValue = this.toolResponse(item);
+    const argumentsMeasurement = measurePayload(argumentsValue, run.redactor);
+    const responseMeasurement = measurePayload(responseValue, run.redactor);
+    const searchSummary =
+      lifecycle === "completed"
+        ? summarizeSearchTool(tool, argumentsValue, responseValue)
+        : null;
     const data: Record<string, unknown> = {
-      toolId: typeof item.id === "string" ? item.id : "unknown",
+      toolId,
+      runId: run.runId,
       kind: type,
       name: this.toolName(item),
-      ...(typeof item.server === "string" ? { server: item.server } : {}),
+      server,
+      tool,
       ...(typeof item.status === "string" ? { status: item.status } : {}),
-      ...(typeof item.durationMs === "number"
-        ? { durationMs: item.durationMs }
+      startedAt:
+        trackedStart?.startedAt ??
+        (lifecycle === "completed" && durationMs !== null
+          ? new Date(observedAt.getTime() - durationMs).toISOString()
+          : observedAt.toISOString()),
+      ...(lifecycle === "completed"
+        ? { completedAt: observedAt.toISOString() }
         : {}),
+      ...(durationMs !== null ? { durationMs } : {}),
       ...(typeof item.exitCode === "number" ? { exitCode: item.exitCode } : {}),
+      argumentsBytes: argumentsMeasurement.bytes,
+      argumentsApproxTokens: argumentsMeasurement.approxTokens,
+      ...(argumentsMeasurement.preview
+        ? { argumentsPreview: argumentsMeasurement.preview }
+        : {}),
+      ...(this.#captureFullToolPayloads
+        ? { debugArgumentsPayload: run.redactor.value(argumentsValue) }
+        : {}),
+      ...(lifecycle === "completed"
+        ? {
+            responseBytes: responseMeasurement.bytes,
+            responseApproxTokens: responseMeasurement.approxTokens,
+            ...(responseMeasurement.preview
+              ? { responsePreview: responseMeasurement.preview }
+              : {}),
+            success: this.toolSucceeded(item),
+            ...(searchSummary
+              ? {
+                  searchQuery: searchSummary.query,
+                  searchResultCount: searchSummary.resultCount,
+                  searchResults: searchSummary.results,
+                }
+              : {}),
+            ...(this.#captureFullToolPayloads
+              ? { debugResponsePayload: run.redactor.value(responseValue) }
+              : {}),
+          }
+        : {}),
     };
+    if (type === "commandExecution") {
+      const command = typeof item.command === "string" ? item.command : "";
+      const output =
+        typeof item.aggregatedOutput === "string" ? item.aggregatedOutput : "";
+      const commandMeasurement = measureText(command, run.redactor);
+      const outputMeasurement = measureText(output, run.redactor);
+      Object.assign(data, {
+        command: commandMeasurement.preview,
+        commandBytes: commandMeasurement.bytes,
+        commandApproxTokens: commandMeasurement.approxTokens,
+        outputBytes: outputMeasurement.bytes,
+        outputApproxTokens: outputMeasurement.approxTokens,
+        ...(lifecycle === "completed" && outputMeasurement.preview
+          ? { outputPreview: outputMeasurement.preview }
+          : {}),
+        stdoutBytes: null,
+        stderrBytes: null,
+        stdoutApproxTokens: null,
+        stderrApproxTokens: null,
+        streamBreakdownAvailable: false,
+      });
+    }
+    const safeData = this.safeRecord(run, data);
+    if (lifecycle === "started" && trackedStart) trackedStart.data = safeData;
     run.emit(
       lifecycle === "started" ? "tool.started" : "tool.completed",
-      this.safeRecord(run, data),
+      safeData,
     );
+    if (lifecycle === "completed") {
+      run.toolStarts.delete(toolId);
+      run.terminalToolIds.add(toolId);
+    }
+  }
+
+  private handleUsageUpdated(run: ActiveRun, value: unknown): void {
+    const usage = this.safeRecord(run, value);
+    const last = this.record(usage.last);
+    const inputTokens = this.number(last.inputTokens);
+    const cachedInputTokens = this.number(last.cachedInputTokens);
+    run.usageCallIndex += 1;
+    run.emit("usage.updated", {
+      ...usage,
+      callIndex: run.usageCallIndex,
+      inputTokens,
+      cachedInputTokens,
+      uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens),
+      outputTokens: this.number(last.outputTokens),
+      reasoningOutputTokens: this.number(last.reasoningOutputTokens),
+      totalTokens: this.number(last.totalTokens),
+      modelContextWindow:
+        typeof usage.modelContextWindow === "number"
+          ? usage.modelContextWindow
+          : null,
+    });
+  }
+
+  private toolIdentifier(item: Record<string, unknown>): string {
+    if (item.type === "commandExecution") return "shell";
+    if (typeof item.tool === "string") return item.tool;
+    return this.toolName(item);
+  }
+
+  private toolArguments(item: Record<string, unknown>): unknown {
+    if (item.type === "commandExecution") return item.command ?? "";
+    if ("arguments" in item) return item.arguments;
+    return null;
+  }
+
+  private toolResponse(item: Record<string, unknown>): unknown {
+    if (item.type === "commandExecution") return item.aggregatedOutput ?? "";
+    if (item.type === "mcpToolCall") return item.result ?? item.error ?? null;
+    if (item.type === "dynamicToolCall") return item.contentItems ?? null;
+    return null;
+  }
+
+  private toolSucceeded(item: Record<string, unknown>): boolean {
+    if (item.type === "commandExecution") {
+      return item.status === "completed" && item.exitCode === 0;
+    }
+    if (typeof item.success === "boolean") return item.success;
+    return item.status === "completed" && !item.error;
+  }
+
+  private number(value: unknown): number {
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
   }
 
   private toolName(item: Record<string, unknown>): string {
     if (item.type === "mcpToolCall") {
-      return [item.server, item.tool].filter((part) => typeof part === "string").join(".");
+      return [item.server, item.tool]
+        .filter((part) => typeof part === "string")
+        .join(".");
     }
     if (typeof item.tool === "string") return item.tool;
     const names: Record<string, string> = {
@@ -404,7 +717,9 @@ export class CodexAdapter implements RuntimeAdapter {
       imageGeneration: "image_generation",
       collabAgentToolCall: "agent_collaboration",
     };
-    return typeof item.type === "string" ? (names[item.type] ?? item.type) : "tool";
+    return typeof item.type === "string"
+      ? (names[item.type] ?? item.type)
+      : "tool";
   }
 
   private handleTurnCompleted(
@@ -423,7 +738,9 @@ export class CodexAdapter implements RuntimeAdapter {
       const turnError = this.record(turn.error);
       const message =
         run.lastError ??
-        (typeof turnError.message === "string" ? turnError.message : "Runtime turn failed");
+        (typeof turnError.message === "string"
+          ? turnError.message
+          : "Runtime turn failed");
       this.finish(run, normalizeRuntimeError(new Error(message)));
     }
   }
@@ -451,6 +768,22 @@ export class CodexAdapter implements RuntimeAdapter {
       return;
     }
 
+    const autoApprovedTool = this.autoApprovedMcpTool(message, run.fullAccess);
+    if (autoApprovedTool) {
+      this.connection.respond(message.id, {
+        action: "accept",
+        content: null,
+        _meta: null,
+      });
+      run.emit("approval.resolved", {
+        decision: "auto",
+        kind: "mcp_elicitation",
+        server: autoApprovedTool.server,
+        tool: autoApprovedTool.tool,
+      });
+      return;
+    }
+
     const approvalId = randomUUID();
     const approval: NativeApproval = {
       id: approvalId,
@@ -466,13 +799,17 @@ export class CodexAdapter implements RuntimeAdapter {
         approvalId,
         kind: this.approvalKind(message.method),
         ...(typeof params.reason === "string" ? { reason: params.reason } : {}),
-        ...(typeof params.command === "string" ? { command: params.command } : {}),
+        ...(typeof params.command === "string"
+          ? { command: params.command }
+          : {}),
         ...(typeof params.cwd === "string" ? { cwd: params.cwd } : {}),
         ...(typeof params.itemId === "string" ? { toolId: params.itemId } : {}),
         ...(typeof params.serverName === "string"
           ? { server: params.serverName }
           : {}),
-        ...(typeof params.message === "string" ? { message: params.message } : {}),
+        ...(typeof params.message === "string"
+          ? { message: params.message }
+          : {}),
       }),
     );
   }
@@ -498,6 +835,27 @@ export class CodexAdapter implements RuntimeAdapter {
     if (method.includes("fileChange")) return "file_change";
     if (method.includes("permissions")) return "permissions";
     return "mcp_elicitation";
+  }
+
+  private autoApprovedMcpTool(
+    message: RpcServerRequest,
+    fullAccess: boolean,
+  ): { server: string; tool: string } | null {
+    if (message.method !== "mcpServer/elicitation/request") return null;
+    const params = message.params ?? {};
+    const server = params.serverName;
+    const prompt = params.message;
+    if (typeof server !== "string" || typeof prompt !== "string") return null;
+    const serverKind = MCP_SERVER_ALIASES[server];
+    if (!serverKind) return null;
+    const readOnlyTools = READ_ONLY_MCP_TOOLS[serverKind];
+    if (!readOnlyTools) return null;
+    const match = /^Allow the [^\n]+ MCP server to run tool "([^"]+)"\?$/.exec(
+      prompt,
+    );
+    const tool = match?.[1];
+    if (!tool || (!fullAccess && !readOnlyTools.includes(tool))) return null;
+    return { server, tool };
   }
 
   private approvalResponse(
@@ -552,6 +910,7 @@ export class CodexAdapter implements RuntimeAdapter {
 
   private finish(run: ActiveRun, error?: Error): void {
     if (run.settled) return;
+    this.failOpenTools(run);
     run.settled = true;
     this.#runs.delete(run.runId);
     if (this.#runByThread.get(run.threadId) === run) {
@@ -559,8 +918,31 @@ export class CodexAdapter implements RuntimeAdapter {
     }
     run.approvals.clear();
     run.approvalsByNativeId.clear();
+    run.terminalToolIds.clear();
     if (error) run.reject(error);
     else run.resolve();
+  }
+
+  private failOpenTools(run: ActiveRun): void {
+    const completedAt = new Date();
+    for (const [toolId, started] of [...run.toolStarts]) {
+      run.toolStarts.delete(toolId);
+      run.terminalToolIds.add(toolId);
+      run.emit(
+        "tool.failed",
+        this.safeRecord(run, {
+          ...started.data,
+          toolId,
+          runId: run.runId,
+          status: "failed",
+          success: false,
+          reason: "terminal_event_missing",
+          startedAt: started.startedAt,
+          completedAt: completedAt.toISOString(),
+          durationMs: Math.max(0, completedAt.getTime() - started.timestampMs),
+        }),
+      );
+    }
   }
 
   private safeRecord(run: ActiveRun, value: unknown): Record<string, unknown> {
