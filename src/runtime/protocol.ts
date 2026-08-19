@@ -30,9 +30,13 @@ export interface RunnerEvent {
 }
 
 export interface McpServerDefinition {
-  name: "work" | "docs" | "posthog";
+  name: "work" | "docs" | "posthog" | "email";
   url: string;
   headers: Record<string, string>;
+  approval?: {
+    defaultMode: "approve" | "prompt";
+    tools: Record<string, "approve" | "prompt">;
+  };
 }
 
 export interface AgentExecutionRequest {
@@ -64,13 +68,21 @@ const headerSchema = z.record(
 
 const mcpServerSchema = z
   .object({
-    name: z.enum(["work", "docs", "posthog"]),
+    name: z.enum(["work", "docs", "posthog", "email"]),
     url: z.string().url().max(2_048),
     headers: headerSchema.default({}),
     credentials: z
       .object({
         bearerToken: z.string().min(1).max(16_384).optional(),
         headers: headerSchema.optional(),
+      })
+      .optional(),
+    approval: z
+      .object({
+        defaultMode: z.enum(["approve", "prompt"]),
+        tools: z
+          .record(z.string().min(1).max(200), z.enum(["approve", "prompt"]))
+          .default({}),
       })
       .optional(),
   })
@@ -99,7 +111,12 @@ const mcpServerSchema = z
     if (server.credentials?.bearerToken && !headers.Authorization) {
       headers.Authorization = `Bearer ${server.credentials.bearerToken}`;
     }
-    return { name: server.name, url: server.url, headers };
+    return {
+      name: server.name,
+      url: server.url,
+      headers,
+      ...(server.approval ? { approval: server.approval } : {}),
+    };
   });
 
 const canonicalRequestSchema = z.object({

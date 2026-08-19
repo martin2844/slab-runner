@@ -38,6 +38,7 @@ interface ActiveRun {
   emit: RuntimeEventSink;
   redactor: Redactor;
   fullAccess: boolean;
+  mcpServers: McpServerDefinition[];
   usageCallIndex: number;
   toolStarts: Map<
     string,
@@ -88,6 +89,12 @@ const READ_ONLY_MCP_TOOLS: Record<string, readonly string[]> = {
     "get_doc_revision",
   ],
   posthog: ["list_projects", "query_analytics"],
+  email: [
+    "email_list_accounts",
+    "email_search",
+    "email_get_message",
+    "email_list_threads",
+  ],
 };
 
 const MCP_SERVER_ALIASES: Record<string, keyof typeof READ_ONLY_MCP_TOOLS> = {
@@ -96,6 +103,7 @@ const MCP_SERVER_ALIASES: Record<string, keyof typeof READ_ONLY_MCP_TOOLS> = {
   docs: "docs",
   "slab-docs": "docs",
   posthog: "posthog",
+  email: "email",
 };
 
 export class CodexAdapter implements RuntimeAdapter {
@@ -188,6 +196,7 @@ export class CodexAdapter implements RuntimeAdapter {
         context.request.mcpServers.map(({ headers }) => headers),
       ),
       fullAccess: context.request.agent.fullAccess,
+      mcpServers: context.request.mcpServers,
       usageCallIndex: 0,
       toolStarts: new Map(),
       terminalToolIds: new Set(),
@@ -369,24 +378,34 @@ export class CodexAdapter implements RuntimeAdapter {
   ): Record<string, unknown> {
     return {
       mcp_servers: Object.fromEntries(
-        servers.map(({ name, url, headers }) => [
+        servers.map(({ name, url, headers, approval }) => [
           name,
           {
             url,
             http_headers: headers,
             enabled: true,
             required: true,
-            default_tools_approval_mode: fullAccess ? "approve" : "prompt",
-            ...(!fullAccess && READ_ONLY_MCP_TOOLS[name]
+            default_tools_approval_mode:
+              approval?.defaultMode ?? (fullAccess ? "approve" : "prompt"),
+            ...(approval?.tools && Object.keys(approval.tools).length > 0
               ? {
                   tools: Object.fromEntries(
-                    READ_ONLY_MCP_TOOLS[name].map((tool) => [
+                    Object.entries(approval.tools).map(([tool, mode]) => [
                       tool,
-                      { approval_mode: "approve" },
+                      { approval_mode: mode },
                     ]),
                   ),
                 }
-              : {}),
+              : !fullAccess && READ_ONLY_MCP_TOOLS[name]
+                ? {
+                    tools: Object.fromEntries(
+                      READ_ONLY_MCP_TOOLS[name].map((tool) => [
+                        tool,
+                        { approval_mode: "approve" },
+                      ]),
+                    ),
+                  }
+                : {}),
           },
         ]),
       ),
@@ -768,7 +787,7 @@ export class CodexAdapter implements RuntimeAdapter {
       return;
     }
 
-    const autoApprovedTool = this.autoApprovedMcpTool(message, run.fullAccess);
+    const autoApprovedTool = this.autoApprovedMcpTool(message, run);
     if (autoApprovedTool) {
       this.connection.respond(message.id, {
         action: "accept",
@@ -839,7 +858,7 @@ export class CodexAdapter implements RuntimeAdapter {
 
   private autoApprovedMcpTool(
     message: RpcServerRequest,
-    fullAccess: boolean,
+    run: ActiveRun,
   ): { server: string; tool: string } | null {
     if (message.method !== "mcpServer/elicitation/request") return null;
     const params = message.params ?? {};
@@ -854,7 +873,13 @@ export class CodexAdapter implements RuntimeAdapter {
       prompt,
     );
     const tool = match?.[1];
-    if (!tool || (!fullAccess && !readOnlyTools.includes(tool))) return null;
+    if (!tool) return null;
+    const definition = run.mcpServers.find(({ name }) => name === serverKind);
+    const explicitMode = definition?.approval?.tools[tool];
+    if (explicitMode === "prompt") return null;
+    if (explicitMode === "approve") return { server, tool };
+    if (definition?.approval?.defaultMode === "prompt") return null;
+    if (!run.fullAccess && !readOnlyTools.includes(tool)) return null;
     return { server, tool };
   }
 

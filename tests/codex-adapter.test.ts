@@ -116,6 +116,82 @@ describe("CodexAdapter", () => {
     );
   });
 
+  it("keeps Email send behind approval even for a full-access agent", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "email",
+          url: "http://127.0.0.1:6981/mcp",
+          headers: { Authorization: "Bearer scoped-email-token" },
+          approval: {
+            defaultMode: "approve",
+            tools: { email_send: "prompt", email_reply: "prompt" },
+          },
+        },
+      ],
+    });
+    request.agent.fullAccess = true;
+    const connection = new FakeAppServerConnection();
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+
+    await adapter.startThread(request);
+    const call = connection.requests.find(
+      ({ method }) => method === "thread/start",
+    );
+    expect(call?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          email: {
+            default_tools_approval_mode: "approve",
+            tools: {
+              email_send: { approval_mode: "prompt" },
+              email_reply: { approval_mode: "prompt" },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("does not auto-approve an explicitly prompted Email send", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "email",
+          url: "http://127.0.0.1:6981/mcp",
+          headers: { Authorization: "Bearer scoped-email-token" },
+          approval: {
+            defaultMode: "approve",
+            tools: { email_send: "prompt" },
+          },
+        },
+      ],
+    });
+    request.agent.fullAccess = true;
+    const { connection, events, completion } = await activeTurn(request);
+    connection.serverRequest({
+      id: 191,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName: "email",
+        message: 'Allow the email MCP server to run tool "email_send"?',
+      },
+    });
+
+    expect(connection.responses).toEqual([]);
+    expect(events.at(-1)).toMatchObject({
+      type: "approval.required",
+      data: { server: "email" },
+    });
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
   it("normalizes assistant, tool, usage, and completion events", async () => {
     const { connection, events, completion } = await activeTurn();
 

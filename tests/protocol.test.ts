@@ -90,6 +90,42 @@ describe("parseExecutionRequest", () => {
     });
   });
 
+  it("accepts scoped Email MCP approval overrides", () => {
+    const request = parseExecutionRequest({
+      runId: "run-email",
+      agent: {
+        id: "sales",
+        name: "Sales",
+        role: "Sales",
+        instructions: "Use email carefully.",
+        fullAccess: true,
+      },
+      runtime: { type: "codex", model: null },
+      thread: { runtimeThreadId: null },
+      message: "Prepare a follow-up",
+      mcpServers: [
+        {
+          name: "email",
+          url: "http://127.0.0.1:6981/mcp",
+          credentials: { bearerToken: "scoped-token" },
+          approval: {
+            defaultMode: "approve",
+            tools: { email_send: "prompt", email_reply: "prompt" },
+          },
+        },
+      ],
+    });
+
+    expect(request.mcpServers[0]).toMatchObject({
+      name: "email",
+      headers: { Authorization: "Bearer scoped-token" },
+      approval: {
+        defaultMode: "approve",
+        tools: { email_send: "prompt", email_reply: "prompt" },
+      },
+    });
+  });
+
   it.each([
     [{ runtime: { type: "claude" } }],
     [
