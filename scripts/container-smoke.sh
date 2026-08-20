@@ -38,6 +38,7 @@ test "$(curl --retry 10 --retry-delay 1 --retry-all-errors --silent --output /de
 
 test "$(docker exec "$container" id -u)" = "10001"
 docker exec "$container" codex --version | grep -F "codex-cli $expected_codex_version" >/dev/null
+docker exec "$container" sh -c 'test -s /etc/ssl/certs/ca-certificates.crt'
 if docker exec "$container" sh -c 'command -v npm >/dev/null 2>&1 || command -v yarn >/dev/null 2>&1 || command -v corepack >/dev/null 2>&1'; then
   echo "The production image must not include package-manager CLIs." >&2
   exit 1

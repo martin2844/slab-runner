@@ -19,7 +19,10 @@ LABEL org.opencontainers.image.title="Slab Runner" \
       org.opencontainers.image.version="development" \
       org.opencontainers.image.source="https://github.com/martin2844/slab-runner"
 
-RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
+  && npm install --global "@openai/codex@${CODEX_VERSION}" \
   && npm cache clean --force \
   && rm -rf \
     /usr/local/lib/node_modules/npm \
