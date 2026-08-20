@@ -46,7 +46,9 @@ The package also exposes:
 slab-runner start
 ```
 
-The default address is `http://127.0.0.1:6990`. Slab Runner refuses non-loopback host values.
+The default address is `http://127.0.0.1:6990`. Slab Runner accepts
+`0.0.0.0` only when a Runner token is configured, for an authenticated private
+container network. It does not accept arbitrary interface addresses.
 
 ## Configuration
 
@@ -57,8 +59,21 @@ The default address is `http://127.0.0.1:6990`. Slab Runner refuses non-loopback
 | `CODEX_BIN` | `codex` | Codex executable path or name |
 | `RUNNER_CODEX_HOME` | `~/.local/state/slab-runner/codex` | Dedicated persistent Codex state used only by Slab Runner |
 | `RUNNER_TOKEN` | unset | Optional local bearer token, minimum 16 characters |
+| `RUNNER_TOKEN_FILE` | unset | File containing the bearer token; mutually exclusive with `RUNNER_TOKEN` |
 
 When `RUNNER_TOKEN` is set, every operational endpoint accepts either `Authorization: Bearer <token>` or `X-Runner-Token: <token>`. `GET /health` remains available for local health probes.
+
+For a container deployment, use:
+
+```dotenv
+RUNNER_HOST=0.0.0.0
+RUNNER_TOKEN_FILE=/run/secrets/runner_token
+RUNNER_CODEX_HOME=/var/lib/slab-runner/codex
+CODEX_BIN=/usr/local/bin/codex
+```
+
+Do not publish port `6990` on the host. Slab Agents reaches Runner through the
+private Compose network and authenticates with the same token.
 
 Runner starts Codex with `RUNNER_CODEX_HOME`, not the user's primary
 `~/.codex` directory. On first startup it copies file-based Codex
