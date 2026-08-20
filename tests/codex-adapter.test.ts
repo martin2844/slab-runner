@@ -24,6 +24,65 @@ async function activeTurn(request = executionRequest()) {
 }
 
 describe("CodexAdapter", () => {
+  it("reports Codex unavailable before the app-server is ready", async () => {
+    const connection = new FakeAppServerConnection();
+    connection.ready = false;
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+
+    await expect(adapter.health()).resolves.toEqual({
+      id: "codex",
+      available: false,
+    });
+    expect(connection.requests).toEqual([]);
+  });
+
+  it("reports Codex unavailable when app-server has no authenticated account", async () => {
+    const connection = new FakeAppServerConnection();
+    connection.requestHandler = (method, params) => {
+      expect(method).toBe("account/read");
+      expect(params).toEqual({ refreshToken: false });
+      return Promise.resolve({ account: null, requiresOpenaiAuth: true });
+    };
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+
+    await expect(adapter.health()).resolves.toEqual({
+      id: "codex",
+      available: false,
+    });
+  });
+
+  it("reports Codex available when app-server has an authenticated account", async () => {
+    const connection = new FakeAppServerConnection();
+    connection.requestHandler = () =>
+      Promise.resolve({
+        account: { type: "chatgpt", email: "operator@example.com" },
+        requiresOpenaiAuth: true,
+      });
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+
+    await expect(adapter.health()).resolves.toEqual({
+      id: "codex",
+      available: true,
+    });
+  });
+
+  it("reports Codex unavailable when account inspection fails or is malformed", async () => {
+    const connection = new FakeAppServerConnection();
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+
+    connection.requestHandler = () => Promise.reject(new Error("rpc failed"));
+    await expect(adapter.health()).resolves.toEqual({
+      id: "codex",
+      available: false,
+    });
+
+    connection.requestHandler = () => Promise.resolve({});
+    await expect(adapter.health()).resolves.toEqual({
+      id: "codex",
+      available: false,
+    });
+  });
+
   it("creates a thread with isolated cwd, agent instructions, and allowed MCP servers", async () => {
     const connection = new FakeAppServerConnection();
     const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");

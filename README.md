@@ -105,7 +105,9 @@ GET /runtimes
 }
 ```
 
-Availability becomes false while Codex is missing, starting, or restarting.
+Availability becomes false while Codex is missing, unauthenticated, starting,
+or restarting. Runner checks the account exposed by `codex app-server`; process
+readiness alone is not enough to advertise an executable runtime.
 
 ### Create a run
 
