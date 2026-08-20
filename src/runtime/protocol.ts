@@ -3,11 +3,14 @@ import { z } from "zod";
 
 export const normalizedEventTypes = [
   "run.started",
+  "context.bootstrap",
   "thread.created",
   "assistant.delta",
   "assistant.completed",
   "tool.started",
   "tool.completed",
+  "tool.failed",
+  "runtime.warning",
   "approval.required",
   "approval.resolved",
   "usage.updated",
@@ -27,9 +30,13 @@ export interface RunnerEvent {
 }
 
 export interface McpServerDefinition {
-  name: "work" | "docs";
+  name: "work" | "docs" | "posthog" | "email";
   url: string;
   headers: Record<string, string>;
+  approval?: {
+    defaultMode: "approve" | "prompt";
+    tools: Record<string, "approve" | "prompt">;
+  };
 }
 
 export interface AgentExecutionRequest {
@@ -39,6 +46,7 @@ export interface AgentExecutionRequest {
     name: string;
     role: string;
     instructions: string;
+    fullAccess: boolean;
   };
   runtime: {
     type: "codex";
@@ -60,13 +68,21 @@ const headerSchema = z.record(
 
 const mcpServerSchema = z
   .object({
-    name: z.enum(["work", "docs"]),
+    name: z.enum(["work", "docs", "posthog", "email"]),
     url: z.string().url().max(2_048),
     headers: headerSchema.default({}),
     credentials: z
       .object({
         bearerToken: z.string().min(1).max(16_384).optional(),
         headers: headerSchema.optional(),
+      })
+      .optional(),
+    approval: z
+      .object({
+        defaultMode: z.enum(["approve", "prompt"]),
+        tools: z
+          .record(z.string().min(1).max(200), z.enum(["approve", "prompt"]))
+          .default({}),
       })
       .optional(),
   })
@@ -95,7 +111,12 @@ const mcpServerSchema = z
     if (server.credentials?.bearerToken && !headers.Authorization) {
       headers.Authorization = `Bearer ${server.credentials.bearerToken}`;
     }
-    return { name: server.name, url: server.url, headers };
+    return {
+      name: server.name,
+      url: server.url,
+      headers,
+      ...(server.approval ? { approval: server.approval } : {}),
+    };
   });
 
 const canonicalRequestSchema = z.object({
@@ -105,6 +126,7 @@ const canonicalRequestSchema = z.object({
     name: z.string().trim().min(1).max(200),
     role: z.string().trim().min(1).max(10_000),
     instructions: z.string().trim().min(1).max(100_000),
+    fullAccess: z.boolean().default(false),
   }),
   runtime: z.object({
     type: z.literal("codex"),
@@ -124,9 +146,10 @@ const canonicalRequestSchema = z.object({
     .max(50),
   mcpServers: z
     .array(mcpServerSchema)
-    .max(2)
+    .max(8)
     .refine(
-      (servers) => new Set(servers.map(({ name }) => name)).size === servers.length,
+      (servers) =>
+        new Set(servers.map(({ name }) => name)).size === servers.length,
       "MCP server names must be unique",
     ),
   cwd: z
@@ -173,6 +196,7 @@ function normalizeExecutionRequest(input: unknown): unknown {
       name,
       role: rawAgent.role,
       instructions: rawAgent.instructions,
+      fullAccess: rawAgent.fullAccess ?? rawAgent.full_access ?? false,
     },
     runtime: {
       type: runtimeType,
@@ -180,7 +204,10 @@ function normalizeExecutionRequest(input: unknown): unknown {
     },
     thread: {
       runtimeThreadId:
-        rawThread.runtimeThreadId ?? raw.runtimeThreadId ?? raw.runtime_thread_id ?? null,
+        rawThread.runtimeThreadId ??
+        raw.runtimeThreadId ??
+        raw.runtime_thread_id ??
+        null,
     },
     message: raw.message ?? raw.prompt,
     context: raw.context ?? [],

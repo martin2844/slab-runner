@@ -2,6 +2,7 @@
 
 import { createServer, type Server } from "node:http";
 import { CodexAdapter } from "./adapters/codex-adapter.js";
+import { prepareIsolatedCodexHome } from "./app-server/codex-home.js";
 import { ProcessAppServerConnection } from "./app-server/process-connection.js";
 import { loadConfig } from "./config.js";
 import { createHttpApp } from "./http/app.js";
@@ -31,7 +32,15 @@ async function main(): Promise<void> {
   const redactor = new Redactor();
   redactor.add(config.runnerToken);
   const logger = new JsonLogger(redactor);
-  const connection = new ProcessAppServerConnection(config.codexBin, logger);
+  prepareIsolatedCodexHome({
+    codexHome: config.codexHome,
+    authSourceFile: config.codexAuthSourceFile,
+  });
+  const connection = new ProcessAppServerConnection(
+    config.codexBin,
+    logger,
+    config.codexHome,
+  );
   const adapter = new CodexAdapter(connection, config.safeCwd);
   try {
     await adapter.start();

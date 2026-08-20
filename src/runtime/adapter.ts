@@ -1,7 +1,4 @@
-import type {
-  AgentExecutionRequest,
-  NormalizedEventType,
-} from "./protocol.js";
+import type { AgentExecutionRequest, NormalizedEventType } from "./protocol.js";
 
 export interface RuntimeHealth {
   id: string;
@@ -19,10 +16,13 @@ export interface RuntimeTurnContext {
   emit: RuntimeEventSink;
 }
 
+export type RuntimeContextProfile = Record<string, unknown>;
+
 export interface RuntimeAdapter {
   readonly id: string;
   start(): Promise<void>;
   health(): Promise<RuntimeHealth>;
+  contextProfile?(request: AgentExecutionRequest): RuntimeContextProfile;
   startThread(request: AgentExecutionRequest): Promise<string>;
   resumeThread(request: AgentExecutionRequest): Promise<string>;
   runTurn(context: RuntimeTurnContext): Promise<void>;

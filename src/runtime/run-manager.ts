@@ -1,12 +1,5 @@
-import type {
-  RuntimeAdapter,
-  RuntimeEventSink,
-} from "./adapter.js";
-import {
-  normalizeRuntimeError,
-  publicError,
-  RunnerError,
-} from "./errors.js";
+import type { RuntimeAdapter, RuntimeEventSink } from "./adapter.js";
+import { normalizeRuntimeError, publicError, RunnerError } from "./errors.js";
 import type {
   AgentExecutionRequest,
   NormalizedEventType,
@@ -159,6 +152,9 @@ export class RunManager {
       runtime: request.runtime.type,
       agentId: request.agent.id,
     });
+    if (adapter.contextProfile) {
+      this.emit(run, "context.bootstrap", adapter.contextProfile(request));
+    }
     try {
       const isNewThread = request.thread.runtimeThreadId === null;
       const runtimeThreadId = isNewThread
@@ -178,7 +174,10 @@ export class RunManager {
         return;
       }
       const sink: RuntimeEventSink = (type, data = {}) => {
-        if (type === "approval.required" && typeof data.approvalId === "string") {
+        if (
+          type === "approval.required" &&
+          typeof data.approvalId === "string"
+        ) {
           run.pendingApprovalIds.add(data.approvalId);
           run.status = "waiting_approval";
         } else if (
@@ -186,7 +185,10 @@ export class RunManager {
           typeof data.approvalId === "string"
         ) {
           run.pendingApprovalIds.delete(data.approvalId);
-          if (run.pendingApprovalIds.size === 0 && run.status === "waiting_approval") {
+          if (
+            run.pendingApprovalIds.size === 0 &&
+            run.status === "waiting_approval"
+          ) {
             run.status = "running";
           }
         }
