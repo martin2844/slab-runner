@@ -130,8 +130,20 @@ export class CodexAdapter implements RuntimeAdapter {
     await this.connection.start();
   }
 
-  health(): Promise<RuntimeHealth> {
-    return Promise.resolve({ id: this.id, available: this.connection.ready });
+  async health(): Promise<RuntimeHealth> {
+    if (!this.connection.ready) {
+      return { id: this.id, available: false };
+    }
+
+    try {
+      const result = await this.connection.request("account/read", {
+        refreshToken: false,
+      });
+      const account = this.readAccount(result);
+      return { id: this.id, available: account !== null };
+    } catch {
+      return { id: this.id, available: false };
+    }
   }
 
   async startThread(request: AgentExecutionRequest): Promise<string> {
@@ -356,6 +368,26 @@ export class CodexAdapter implements RuntimeAdapter {
         503,
       );
     }
+  }
+
+  private readAccount(result: unknown): Record<string, unknown> | null {
+    if (!result || typeof result !== "object" || !("account" in result)) {
+      throw new RunnerError(
+        "RUNTIME_UNAVAILABLE",
+        "Codex returned an invalid account response",
+        503,
+      );
+    }
+    const account = result.account;
+    if (account === null) return null;
+    if (typeof account !== "object") {
+      throw new RunnerError(
+        "RUNTIME_UNAVAILABLE",
+        "Codex returned an invalid account response",
+        503,
+      );
+    }
+    return account as Record<string, unknown>;
   }
 
   private threadParams(
