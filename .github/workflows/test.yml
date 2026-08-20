@@ -9,15 +9,22 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: shellcheck scripts/*.sh
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: docker build --build-arg CODEX_VERSION=0.148.0 --tag slab-runner:ci .
+      - env:
+          SLAB_RUNNER_SMOKE_IMAGE: slab-runner:ci
+          CODEX_VERSION: "0.148.0"
+        run: ./scripts/container-smoke.sh

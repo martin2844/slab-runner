@@ -21,6 +21,15 @@ LABEL org.opencontainers.image.title="Slab Runner" \
 
 RUN npm install --global "@openai/codex@${CODEX_VERSION}" \
   && npm cache clean --force \
+  && rm -rf \
+    /usr/local/lib/node_modules/npm \
+    /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm \
+    /usr/local/bin/npx \
+    /usr/local/bin/corepack \
+    /usr/local/bin/yarn \
+    /usr/local/bin/yarnpkg \
+    /opt/yarn-v1.22.22 \
   && groupadd --system --gid 10001 slab-runner \
   && useradd --system --uid 10001 --gid slab-runner --create-home slab-runner
 
@@ -47,4 +56,3 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:6990/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
 CMD ["node", "dist/cli.js", "start"]
-
