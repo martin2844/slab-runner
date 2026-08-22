@@ -30,7 +30,7 @@ export interface RunnerEvent {
 }
 
 export interface McpServerDefinition {
-  name: "work" | "docs" | "posthog" | "email";
+  name: string;
   url: string;
   headers: Record<string, string>;
   approval?: {
@@ -68,7 +68,15 @@ const headerSchema = z.record(
 
 const mcpServerSchema = z
   .object({
-    name: z.enum(["work", "docs", "posthog", "email"]),
+    name: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(
+        /^[a-z0-9][a-z0-9_-]*$/,
+        "MCP server names must use lowercase letters, numbers, underscores, or hyphens",
+      ),
     url: z.string().url().max(2_048),
     headers: headerSchema.default({}),
     credentials: z

@@ -126,12 +126,43 @@ describe("parseExecutionRequest", () => {
     });
   });
 
+  it("accepts safe dynamic MCP server names for custom integrations", () => {
+    const request = parseExecutionRequest({
+      runId: "run-custom-http",
+      agent: {
+        id: "coo",
+        name: "COO",
+        role: "Operations",
+        instructions: "Use configured business metrics.",
+      },
+      runtime: { type: "codex", model: null },
+      thread: { runtimeThreadId: null },
+      message: "Review company metrics",
+      mcpServers: [
+        {
+          name: "custom_http_agent_metrics_api",
+          url: "http://slab-agents:3009/api/integrations/example/mcp?run=run-custom-http",
+          credentials: { bearerToken: "run-scoped-token" },
+        },
+      ],
+    });
+
+    expect(request.mcpServers[0]).toMatchObject({
+      name: "custom_http_agent_metrics_api",
+      headers: { Authorization: "Bearer run-scoped-token" },
+    });
+  });
+
   it.each([
     [{ runtime: { type: "claude" } }],
     [
       {
         mcpServers: [
-          { name: "other", url: "https://example.test/mcp", headers: {} },
+          {
+            name: "unsafe.server/name",
+            url: "https://example.test/mcp",
+            headers: {},
+          },
         ],
       },
     ],
