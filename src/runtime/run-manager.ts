@@ -6,6 +6,21 @@ import type {
   RunnerEvent,
 } from "./protocol.js";
 import type { Logger } from "../lib/logger.js";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  ftruncateSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
+import { constants } from "node:fs";
+import { dirname } from "node:path";
 
 export type RunStatus =
   | "running"
@@ -16,7 +31,8 @@ export type RunStatus =
   | "cancelled";
 
 interface ManagedRun {
-  request: AgentExecutionRequest;
+  runId: string;
+  request: AgentExecutionRequest | null;
   status: RunStatus;
   nextEventId: number;
   events: RunnerEvent[];
@@ -32,6 +48,11 @@ export interface EventStreamSnapshot {
   unsubscribe(): void;
 }
 
+type JournalEntry =
+  | { type: "accepted"; runId: string; timestamp: string }
+  | { type: "expired"; runId: string; timestamp: string }
+  | { type: "event"; event: RunnerEvent };
+
 const TERMINAL_TYPES = new Set<NormalizedEventType>([
   "run.completed",
   "run.failed",
@@ -46,12 +67,118 @@ const TERMINAL_STATUSES = new Set<RunStatus>([
 
 export class RunManager {
   readonly #runs = new Map<string, ManagedRun>();
+  readonly #seenRunIds = new Set<string>();
+  readonly #restartableRunIds = new Set<string>();
 
   constructor(
     private readonly adapters: Map<string, RuntimeAdapter>,
     private readonly logger: Logger,
     private readonly retentionMs = 15 * 60 * 1_000,
-  ) {}
+    private readonly journalFile?: string,
+  ) {
+    if (journalFile && existsSync(journalFile)) {
+      const histories = new Map<string, RunnerEvent[]>();
+      let journalBuffer = readFileSync(journalFile);
+      if (
+        journalBuffer.length > 0 &&
+        journalBuffer[journalBuffer.length - 1] !== 0x0a
+      ) {
+        const validLength = journalBuffer.lastIndexOf(0x0a) + 1;
+        const journal = openSync(journalFile, constants.O_WRONLY);
+        try {
+          ftruncateSync(journal, validLength);
+          fsyncSync(journal);
+        } finally {
+          closeSync(journal);
+        }
+        journalBuffer = journalBuffer.subarray(0, validLength);
+      }
+      const journalContents = journalBuffer.toString("utf8");
+      const lines = journalContents.split("\n");
+      for (const line of lines) {
+        if (!line) continue;
+        const entry = JSON.parse(line) as Partial<JournalEntry> & {
+          runId?: unknown;
+        };
+        if (entry.type === "expired") {
+          if (typeof entry.runId !== "string" || !entry.runId) {
+            throw new Error("Runner journal contains an invalid tombstone.");
+          }
+          this.#seenRunIds.add(entry.runId);
+          histories.delete(entry.runId);
+          continue;
+        }
+        if (entry.type === "event") {
+          const event = entry.event;
+          if (
+            !event ||
+            typeof event.runId !== "string" ||
+            typeof event.id !== "number" ||
+            typeof event.type !== "string"
+          ) {
+            throw new Error("Runner journal contains an invalid event.");
+          }
+          const events = histories.get(event.runId) ?? [];
+          events.push(event);
+          histories.set(event.runId, events);
+          this.#seenRunIds.add(event.runId);
+          continue;
+        }
+        if (typeof entry.runId !== "string" || !entry.runId) {
+          throw new Error("Runner journal contains an invalid run identifier.");
+        }
+        this.#seenRunIds.add(entry.runId);
+        if (!histories.has(entry.runId)) histories.set(entry.runId, []);
+      }
+      for (const [runId, persistedEvents] of histories) {
+        if (persistedEvents.length === 0) {
+          this.#restartableRunIds.add(runId);
+          continue;
+        }
+        const events = [...persistedEvents].sort((a, b) => a.id - b.id);
+        const terminal = events.findLast((event) =>
+          TERMINAL_TYPES.has(event.type),
+        );
+        if (
+          terminal &&
+          Date.now() - Date.parse(terminal.timestamp) >= this.retentionMs
+        ) {
+          continue;
+        }
+        const status: RunStatus = terminal
+          ? terminal.type === "run.completed"
+            ? "completed"
+            : terminal.type === "run.cancelled"
+              ? "cancelled"
+              : "failed"
+          : "failed";
+        const run: ManagedRun = {
+          runId,
+          request: null,
+          status,
+          nextEventId: Math.max(...events.map(({ id }) => id)) + 1,
+          events,
+          listeners: new Set(),
+          cleanupTimer: null,
+          cancelRequested: false,
+          pendingApprovalIds: new Set(),
+        };
+        this.#runs.set(runId, run);
+        if (!terminal) {
+          this.emit(run, "run.failed", {
+            error: publicError(
+              new RunnerError(
+                "RUN_INTERRUPTED",
+                "Runner restarted before the execution reached a terminal state",
+                500,
+              ),
+            ),
+          });
+        }
+        this.scheduleCleanup(run);
+      }
+    }
+  }
 
   create(request: AgentExecutionRequest): { runId: string; status: "running" } {
     if (this.#runs.has(request.runId)) {
@@ -61,7 +188,21 @@ export class RunManager {
         409,
       );
     }
+    if (
+      this.#seenRunIds.has(request.runId) &&
+      !this.#restartableRunIds.has(request.runId)
+    ) {
+      throw new RunnerError(
+        "RUN_HISTORY_EXPIRED",
+        "Run history is no longer available; refusing to execute the same run again",
+        410,
+      );
+    }
+    if (!this.#restartableRunIds.delete(request.runId)) {
+      this.recordRunIdentity(request.runId);
+    }
     const run: ManagedRun = {
+      runId: request.runId,
       request,
       status: "running",
       nextEventId: 1,
@@ -78,6 +219,10 @@ export class RunManager {
 
   has(runId: string): boolean {
     return this.#runs.has(runId);
+  }
+
+  wasSeen(runId: string): boolean {
+    return this.#seenRunIds.has(runId) && !this.#restartableRunIds.has(runId);
   }
 
   status(runId: string): RunStatus | null {
@@ -107,7 +252,15 @@ export class RunManager {
     }
     run.cancelRequested = true;
     run.status = "cancelling";
-    const adapter = this.requireAdapter(run.request.runtime.type);
+    const request = run.request;
+    if (!request) {
+      throw new RunnerError(
+        "RUN_HISTORY_EXPIRED",
+        "The live execution request is no longer available",
+        410,
+      );
+    }
+    const adapter = this.requireAdapter(request.runtime.type);
     try {
       await adapter.cancelRun(runId);
     } catch (error) {
@@ -132,7 +285,15 @@ export class RunManager {
         409,
       );
     }
-    await this.requireAdapter(run.request.runtime.type).respondToApproval(
+    const request = run.request;
+    if (!request) {
+      throw new RunnerError(
+        "RUN_HISTORY_EXPIRED",
+        "The live execution request is no longer available",
+        410,
+      );
+    }
+    await this.requireAdapter(request.runtime.type).respondToApproval(
       runId,
       approvalId,
       decision,
@@ -141,7 +302,8 @@ export class RunManager {
   }
 
   private async execute(run: ManagedRun): Promise<void> {
-    const { request } = run;
+    const request = run.request;
+    if (!request) return;
     const adapter = this.requireAdapter(request.runtime.type);
     this.logger.info("run started", {
       runId: request.runId,
@@ -239,12 +401,12 @@ export class RunManager {
     const event: RunnerEvent = {
       id: run.nextEventId++,
       type,
-      runId: run.request.runId,
+      runId: run.runId,
       timestamp: new Date().toISOString(),
       data,
     };
+    this.recordEvent(event);
     run.events.push(event);
-    if (run.events.length > 2_000) run.events.shift();
     for (const listener of run.listeners) listener(event);
     if (TERMINAL_TYPES.has(type)) run.listeners.clear();
   }
@@ -252,8 +414,15 @@ export class RunManager {
   private scheduleCleanup(run: ManagedRun): void {
     if (run.cleanupTimer) clearTimeout(run.cleanupTimer);
     run.cleanupTimer = setTimeout(() => {
-      if (this.#runs.get(run.request.runId) === run) {
-        this.#runs.delete(run.request.runId);
+      if (this.#runs.get(run.runId) === run) {
+        this.#runs.delete(run.runId);
+        try {
+          this.compactJournal();
+        } catch {
+          this.logger.error("runner journal compaction failed", {
+            runId: run.runId,
+          });
+        }
       }
     }, this.retentionMs);
     run.cleanupTimer.unref();
@@ -265,6 +434,99 @@ export class RunManager {
       throw new RunnerError("RUN_NOT_FOUND", "Run was not found", 404);
     }
     return run;
+  }
+
+  private recordRunIdentity(runId: string): void {
+    this.appendJournalEntry({
+      type: "accepted",
+      runId,
+      timestamp: new Date().toISOString(),
+    });
+    this.#seenRunIds.add(runId);
+  }
+
+  private recordEvent(event: RunnerEvent): void {
+    this.appendJournalEntry({ type: "event", event });
+  }
+
+  private appendJournalEntry(entry: JournalEntry): void {
+    if (!this.journalFile) return;
+    const journalDirectory = dirname(this.journalFile);
+    mkdirSync(journalDirectory, { recursive: true, mode: 0o700 });
+    const existed = existsSync(this.journalFile);
+    const journal = openSync(
+      this.journalFile,
+      constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY,
+      0o600,
+    );
+    try {
+      chmodSync(this.journalFile, 0o600);
+      this.writeAll(journal, `${JSON.stringify(entry)}\n`);
+      fsyncSync(journal);
+    } finally {
+      closeSync(journal);
+    }
+    if (!existed) {
+      const directory = openSync(journalDirectory, constants.O_RDONLY);
+      try {
+        fsyncSync(directory);
+      } finally {
+        closeSync(directory);
+      }
+    }
+  }
+
+  private compactJournal(): void {
+    if (!this.journalFile) return;
+    const entries: JournalEntry[] = [];
+    const timestamp = new Date().toISOString();
+    for (const runId of this.#seenRunIds) {
+      const run = this.#runs.get(runId);
+      if (run) {
+        entries.push({ type: "accepted", runId, timestamp });
+        entries.push(
+          ...run.events.map((event) => ({ type: "event" as const, event })),
+        );
+      } else if (this.#restartableRunIds.has(runId)) {
+        entries.push({ type: "accepted", runId, timestamp });
+      } else {
+        entries.push({ type: "expired", runId, timestamp });
+      }
+    }
+    const journalDirectory = dirname(this.journalFile);
+    mkdirSync(journalDirectory, { recursive: true, mode: 0o700 });
+    const temporary = `${this.journalFile}.compact.${process.pid}.${Date.now()}`;
+    const output = openSync(
+      temporary,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+      0o600,
+    );
+    try {
+      for (const entry of entries) {
+        this.writeAll(output, `${JSON.stringify(entry)}\n`);
+      }
+      fsyncSync(output);
+    } catch (error) {
+      closeSync(output);
+      if (existsSync(temporary)) unlinkSync(temporary);
+      throw error;
+    }
+    closeSync(output);
+    renameSync(temporary, this.journalFile);
+    const directory = openSync(journalDirectory, constants.O_RDONLY);
+    try {
+      fsyncSync(directory);
+    } finally {
+      closeSync(directory);
+    }
+  }
+
+  private writeAll(file: number, value: string): void {
+    const content = Buffer.from(value, "utf8");
+    let offset = 0;
+    while (offset < content.length) {
+      offset += writeSync(file, content, offset, content.length - offset);
+    }
   }
 
   private requireAdapter(runtime: string): RuntimeAdapter {

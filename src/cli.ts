@@ -10,7 +10,11 @@ import { JsonLogger } from "./lib/logger.js";
 import { Redactor } from "./lib/redactor.js";
 import { RunManager } from "./runtime/run-manager.js";
 
-async function listen(server: Server, port: number, host: string): Promise<void> {
+async function listen(
+  server: Server,
+  port: number,
+  host: string,
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => {
@@ -47,7 +51,12 @@ async function main(): Promise<void> {
   } catch {
     logger.warn("runtime unavailable at startup", { runtime: "codex" });
   }
-  const runManager = new RunManager(new Map([[adapter.id, adapter]]), logger);
+  const runManager = new RunManager(
+    new Map([[adapter.id, adapter]]),
+    logger,
+    undefined,
+    config.runJournalFile,
+  );
   const app = createHttpApp({
     runManager,
     adapters: [adapter],

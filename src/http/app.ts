@@ -53,7 +53,10 @@ export function createHttpApp(options: {
       if (isAuthorized(request, token)) next();
       else
         response.status(401).json({
-          error: { code: "INVALID_REQUEST", message: "Authentication required" },
+          error: {
+            code: "INVALID_REQUEST",
+            message: "Authentication required",
+          },
         });
     });
   }
@@ -77,8 +80,33 @@ export function createHttpApp(options: {
 
   app.post("/runs", (request, response, next) => {
     try {
-      const result = options.runManager.create(parseExecutionRequest(request.body));
+      const result = options.runManager.create(
+        parseExecutionRequest(request.body),
+      );
       response.status(202).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/runs/:runId/attach", (request, response, next) => {
+    try {
+      const runId = request.params.runId;
+      if (!runId)
+        throw new RunnerError("RUN_NOT_FOUND", "Run was not found", 404);
+      const status = options.runManager.status(runId);
+      if (status) {
+        response.json({ runId, status });
+        return;
+      }
+      if (options.runManager.wasSeen(runId)) {
+        throw new RunnerError(
+          "RUN_HISTORY_EXPIRED",
+          "Run history is no longer available",
+          410,
+        );
+      }
+      throw new RunnerError("RUN_NOT_FOUND", "Run was not found", 404);
     } catch (error) {
       next(error);
     }
@@ -87,11 +115,15 @@ export function createHttpApp(options: {
   app.get("/runs/:runId/events", (request, response, next) => {
     try {
       const runId = request.params.runId;
-      if (!runId) throw new RunnerError("RUN_NOT_FOUND", "Run was not found", 404);
+      if (!runId)
+        throw new RunnerError("RUN_NOT_FOUND", "Run was not found", 404);
       if (!options.runManager.has(runId)) {
         throw new RunnerError("RUN_NOT_FOUND", "Run was not found", 404);
       }
-      const lastEventId = Number.parseInt(request.header("last-event-id") ?? "0", 10);
+      const lastEventId = Number.parseInt(
+        request.header("last-event-id") ?? "0",
+        10,
+      );
       const afterEventId = Number.isFinite(lastEventId) ? lastEventId : 0;
       response.status(200);
       response.set({
@@ -115,13 +147,17 @@ export function createHttpApp(options: {
         afterEventId,
         (event) => {
           sendEvent(response, event);
-          if (event.type.startsWith("run.") && event.type !== "run.started") close();
+          if (event.type.startsWith("run.") && event.type !== "run.started")
+            close();
         },
       );
       for (const event of snapshot.events) sendEvent(response, event);
       if (snapshot.terminal) close();
       else {
-        keepAlive = setInterval(() => response.write(": keepalive\n\n"), 15_000);
+        keepAlive = setInterval(
+          () => response.write(": keepalive\n\n"),
+          15_000,
+        );
         keepAlive.unref();
       }
       request.on("close", () => {
@@ -136,7 +172,8 @@ export function createHttpApp(options: {
   app.delete("/runs/:runId", async (request, response, next) => {
     try {
       const runId = request.params.runId;
-      if (!runId) throw new RunnerError("RUN_NOT_FOUND", "Run was not found", 404);
+      if (!runId)
+        throw new RunnerError("RUN_NOT_FOUND", "Run was not found", 404);
       response.json(await options.runManager.cancel(runId));
     } catch (error) {
       next(error);
@@ -176,7 +213,12 @@ export function createHttpApp(options: {
     });
   });
 
-  const errorHandler: ErrorRequestHandler = (error, _request, response, next) => {
+  const errorHandler: ErrorRequestHandler = (
+    error,
+    _request,
+    response,
+    next,
+  ) => {
     void next;
     if (response.headersSent) {
       response.end();
@@ -212,7 +254,9 @@ export function createHttpApp(options: {
             "The request could not be completed",
             500,
           );
-    response.status(normalized.httpStatus).json({ error: publicError(normalized) });
+    response
+      .status(normalized.httpStatus)
+      .json({ error: publicError(normalized) });
   };
   app.use(errorHandler);
   return app;

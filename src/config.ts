@@ -6,22 +6,24 @@ import { z } from "zod";
 const runnerHosts = ["127.0.0.1", "::1", "localhost", "0.0.0.0"] as const;
 const loopbackHosts = new Set<string>(["127.0.0.1", "::1", "localhost"]);
 
-const envSchema = z.object({
-  RUNNER_HOST: z.enum(runnerHosts).default("127.0.0.1"),
-  RUNNER_PORT: z.coerce.number().int().min(1).max(65_535).default(6990),
-  CODEX_BIN: z.string().trim().min(1).default("codex"),
-  RUNNER_CODEX_HOME: z.string().trim().min(1).optional(),
-  RUNNER_TOKEN: z.string().min(16).optional(),
-  RUNNER_TOKEN_FILE: z.string().trim().min(1).optional(),
-}).superRefine((value, context) => {
-  if (value.RUNNER_TOKEN && value.RUNNER_TOKEN_FILE) {
-    context.addIssue({
-      code: "custom",
-      path: ["RUNNER_TOKEN_FILE"],
-      message: "Configure only one of RUNNER_TOKEN or RUNNER_TOKEN_FILE.",
-    });
-  }
-});
+const envSchema = z
+  .object({
+    RUNNER_HOST: z.enum(runnerHosts).default("127.0.0.1"),
+    RUNNER_PORT: z.coerce.number().int().min(1).max(65_535).default(6990),
+    CODEX_BIN: z.string().trim().min(1).default("codex"),
+    RUNNER_CODEX_HOME: z.string().trim().min(1).optional(),
+    RUNNER_TOKEN: z.string().min(16).optional(),
+    RUNNER_TOKEN_FILE: z.string().trim().min(1).optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.RUNNER_TOKEN && value.RUNNER_TOKEN_FILE) {
+      context.addIssue({
+        code: "custom",
+        path: ["RUNNER_TOKEN_FILE"],
+        message: "Configure only one of RUNNER_TOKEN or RUNNER_TOKEN_FILE.",
+      });
+    }
+  });
 
 export interface RunnerConfig {
   host: (typeof runnerHosts)[number];
@@ -31,6 +33,7 @@ export interface RunnerConfig {
   codexAuthSourceFile: string;
   runnerToken?: string;
   safeCwd: string;
+  runJournalFile: string;
 }
 
 function readRunnerToken(filename: string): string {
@@ -69,5 +72,6 @@ export function loadConfig(
     codexAuthSourceFile: join(primaryCodexHome, "auth.json"),
     ...(runnerToken ? { runnerToken } : {}),
     safeCwd,
+    runJournalFile: join(codexHome, "run-journal.jsonl"),
   };
 }

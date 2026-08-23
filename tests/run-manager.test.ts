@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SilentLogger } from "../src/lib/logger.js";
 import type {
   RuntimeAdapter,
@@ -80,6 +83,248 @@ function managerWith(adapter = new FakeRuntimeAdapter()) {
 }
 
 describe("RunManager", () => {
+  it("persists run identities and refuses re-execution after in-memory history expires", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "slab-runner-journal-"));
+    const journal = join(directory, "runs.jsonl");
+    try {
+      const firstAdapter = new FakeRuntimeAdapter();
+      const first = new RunManager(
+        new Map([[firstAdapter.id, firstAdapter]]),
+        new SilentLogger(),
+        50,
+        journal,
+      );
+      first.create(executionRequest({ runId: "durable-run" }));
+      await vi.waitFor(() =>
+        expect(first.status("durable-run")).toBe("completed"),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 70));
+      expect(first.status("durable-run")).toBeNull();
+      const compacted = readFileSync(journal, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string; runId: string });
+      expect(compacted).toEqual([
+        expect.objectContaining({ type: "expired", runId: "durable-run" }),
+      ]);
+
+      const restartedAdapter = new FakeRuntimeAdapter();
+      const restarted = new RunManager(
+        new Map([[restartedAdapter.id, restartedAdapter]]),
+        new SilentLogger(),
+        50,
+        journal,
+      );
+      expect(() =>
+        restarted.create(executionRequest({ runId: "durable-run" })),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "RUN_HISTORY_EXPIRED",
+          httpStatus: 410,
+        }),
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("replays a durable terminal outcome after restart", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "slab-runner-journal-"));
+    const journal = join(directory, "runs.jsonl");
+    try {
+      const firstAdapter = new FakeRuntimeAdapter();
+      const first = new RunManager(
+        new Map([[firstAdapter.id, firstAdapter]]),
+        new SilentLogger(),
+        60_000,
+        journal,
+      );
+      first.create(executionRequest({ runId: "durable-terminal" }));
+      await vi.waitFor(() =>
+        expect(first.status("durable-terminal")).toBe("completed"),
+      );
+
+      const restarted = new RunManager(
+        new Map([[firstAdapter.id, firstAdapter]]),
+        new SilentLogger(),
+        60_000,
+        journal,
+      );
+      expect(restarted.status("durable-terminal")).toBe("completed");
+      expect(
+        restarted.openEventStream("durable-terminal", 0, () => {}).events.at(-1)
+          ?.type,
+      ).toBe("run.completed");
+      expect(() =>
+        restarted.create(executionRequest({ runId: "durable-terminal" })),
+      ).toThrowError(expect.objectContaining({ code: "RUN_ALREADY_EXISTS" }));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("restarts an accepted intent only when no execution event was durable", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "slab-runner-journal-"));
+    const journal = join(directory, "runs.jsonl");
+    try {
+      writeFileSync(
+        journal,
+        `${JSON.stringify({
+          type: "accepted",
+          runId: "accepted-only",
+          timestamp: new Date().toISOString(),
+        })}\n`,
+      );
+      const adapter = new FakeRuntimeAdapter();
+      const manager = new RunManager(
+        new Map([[adapter.id, adapter]]),
+        new SilentLogger(),
+        60_000,
+        journal,
+      );
+      expect(manager.wasSeen("accepted-only")).toBe(false);
+      manager.create(executionRequest({ runId: "accepted-only" }));
+      await vi.waitFor(() =>
+        expect(manager.status("accepted-only")).toBe("completed"),
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("truncates a torn journal tail before appending new durable events", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "slab-runner-journal-"));
+    const journal = join(directory, "runs.jsonl");
+    try {
+      writeFileSync(
+        journal,
+        `${JSON.stringify({
+          type: "expired",
+          runId: "expired-before-torn-tail",
+          timestamp: new Date().toISOString(),
+        })}\n{"type":"event","event":`,
+      );
+      const adapter = new FakeRuntimeAdapter();
+      const recovered = new RunManager(
+        new Map([[adapter.id, adapter]]),
+        new SilentLogger(),
+        60_000,
+        journal,
+      );
+      recovered.create(executionRequest({ runId: "after-torn-tail" }));
+      await vi.waitFor(() =>
+        expect(recovered.status("after-torn-tail")).toBe("completed"),
+      );
+      expect(() =>
+        readFileSync(journal, "utf8")
+          .trim()
+          .split("\n")
+          .forEach((line) => {
+            JSON.parse(line);
+          }),
+      ).not.toThrow();
+
+      const restarted = new RunManager(
+        new Map([[adapter.id, adapter]]),
+        new SilentLogger(),
+        60_000,
+        journal,
+      );
+      expect(restarted.status("after-torn-tail")).toBe("completed");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a complete JSON record without its newline as uncommitted", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "slab-runner-journal-"));
+    const journal = join(directory, "runs.jsonl");
+    try {
+      writeFileSync(
+        journal,
+        JSON.stringify({
+          type: "accepted",
+          runId: "unframed-accepted-intent",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+      const adapter = new FakeRuntimeAdapter();
+      const recovered = new RunManager(
+        new Map([[adapter.id, adapter]]),
+        new SilentLogger(),
+        60_000,
+        journal,
+      );
+      expect(recovered.wasSeen("unframed-accepted-intent")).toBe(false);
+      recovered.create(executionRequest({ runId: "after-unframed-record" }));
+      await vi.waitFor(() =>
+        expect(recovered.status("after-unframed-record")).toBe("completed"),
+      );
+
+      const restarted = new RunManager(
+        new Map([[adapter.id, adapter]]),
+        new SilentLogger(),
+        60_000,
+        journal,
+      );
+      expect(restarted.status("after-unframed-record")).toBe("completed");
+      expect(restarted.wasSeen("unframed-accepted-intent")).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("terminalizes an execution interrupted after its durable start event", () => {
+    const directory = mkdtempSync(join(tmpdir(), "slab-runner-journal-"));
+    const journal = join(directory, "runs.jsonl");
+    const runId = "interrupted-run";
+    try {
+      writeFileSync(
+        journal,
+        [
+          {
+            type: "accepted",
+            runId,
+            timestamp: new Date().toISOString(),
+          },
+          {
+            type: "event",
+            event: {
+              id: 1,
+              type: "run.started",
+              runId,
+              timestamp: new Date().toISOString(),
+              data: {},
+            },
+          },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n") + "\n",
+      );
+      const adapter = new FakeRuntimeAdapter();
+      const manager = new RunManager(
+        new Map([[adapter.id, adapter]]),
+        new SilentLogger(),
+        60_000,
+        journal,
+      );
+      expect(manager.status(runId)).toBe("failed");
+      const failure = manager.openEventStream(runId, 1, () => {}).events[0];
+      expect(failure).toBeDefined();
+      if (!failure) throw new Error("missing synthetic terminal event");
+      expect(failure.type).toBe("run.failed");
+      expect(failure.data).toEqual({
+        error: {
+          code: "RUN_INTERRUPTED",
+          message:
+            "Runner restarted before the execution reached a terminal state",
+        },
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("emits a complete normalized lifecycle and replays it", async () => {
     const { manager } = managerWith();
     expect(manager.create(executionRequest())).toEqual({
@@ -99,6 +344,80 @@ describe("RunManager", () => {
       "run.completed",
     ]);
     expect(stream.events.map(({ id }) => id)).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+
+  it("retains a complete replay window beyond two thousand events", async () => {
+    const { adapter, manager } = managerWith();
+    adapter.turn = (context) => {
+      for (let index = 0; index < 2_100; index += 1) {
+        context.emit("assistant.delta", { delta: String(index % 10) });
+      }
+      context.emit("assistant.completed", { message: "complete" });
+      return Promise.resolve();
+    };
+    manager.create(executionRequest({ runId: "large-event-run" }));
+    await vi.waitFor(() =>
+      expect(manager.status("large-event-run")).toBe("completed"),
+    );
+    const events = manager.openEventStream(
+      "large-event-run",
+      0,
+      () => {},
+    ).events;
+    expect(events.length).toBeGreaterThan(2_000);
+    expect(events.map(({ id }) => id)).toEqual(
+      Array.from({ length: events.length }, (_, index) => index + 1),
+    );
+    expect(events.at(-1)?.type).toBe("run.completed");
+  });
+
+  it("restores more than two thousand durable events without a cursor gap", () => {
+    const directory = mkdtempSync(join(tmpdir(), "slab-runner-large-journal-"));
+    const journal = join(directory, "runs.jsonl");
+    const runId = "large-restored-run";
+    try {
+      const timestamp = new Date().toISOString();
+      const entries = [
+        { type: "accepted", runId, timestamp },
+        ...Array.from({ length: 2_100 }, (_, index) => ({
+          type: "event",
+          event: {
+            id: index + 1,
+            type: "assistant.delta",
+            runId,
+            timestamp,
+            data: { delta: "x" },
+          },
+        })),
+        {
+          type: "event",
+          event: {
+            id: 2_101,
+            type: "run.completed",
+            runId,
+            timestamp,
+            data: { runtimeThreadId: "thread" },
+          },
+        },
+      ];
+      writeFileSync(
+        journal,
+        `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+      );
+      const adapter = new FakeRuntimeAdapter();
+      const manager = new RunManager(
+        new Map([[adapter.id, adapter]]),
+        new SilentLogger(),
+        60_000,
+        journal,
+      );
+      const events = manager.openEventStream(runId, 0, () => {}).events;
+      expect(events).toHaveLength(2_101);
+      expect(events[0]?.id).toBe(1);
+      expect(events.at(-1)?.id).toBe(2_101);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("resumes a mapped thread without emitting thread.created", async () => {

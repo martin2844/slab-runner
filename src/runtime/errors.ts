@@ -8,6 +8,8 @@ export const runnerErrorCodes = [
   "UNKNOWN_RUNTIME_ERROR",
   "RUN_NOT_FOUND",
   "RUN_ALREADY_EXISTS",
+  "RUN_HISTORY_EXPIRED",
+  "RUN_INTERRUPTED",
   "INVALID_REQUEST",
 ] as const;
 
@@ -26,18 +28,27 @@ export class RunnerError extends Error {
 }
 
 export function isThreadNotFoundMessage(message: string): boolean {
-  return /thread.*(?:not found|does not exist)|rollout.*not found/i.test(message);
+  return /thread.*(?:not found|does not exist)|rollout.*not found/i.test(
+    message,
+  );
 }
 
 export function isMcpFailureMessage(message: string): boolean {
-  return /mcp.*(?:failed|connection|initialize|timed out|unavailable)/i.test(message);
+  return /mcp.*(?:failed|connection|initialize|timed out|unavailable)/i.test(
+    message,
+  );
 }
 
 export function normalizeRuntimeError(error: unknown): RunnerError {
   if (error instanceof RunnerError) return error;
-  const message = error instanceof Error ? error.message : "Unknown runtime error";
+  const message =
+    error instanceof Error ? error.message : "Unknown runtime error";
   if (isThreadNotFoundMessage(message)) {
-    return new RunnerError("THREAD_NOT_FOUND", "Runtime thread was not found", 404);
+    return new RunnerError(
+      "THREAD_NOT_FOUND",
+      "Runtime thread was not found",
+      404,
+    );
   }
   if (isMcpFailureMessage(message)) {
     return new RunnerError(

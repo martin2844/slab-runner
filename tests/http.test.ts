@@ -1,4 +1,7 @@
 import { createServer, type Server } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHttpApp } from "../src/http/app.js";
@@ -9,6 +12,7 @@ import type {
   RuntimeTurnContext,
 } from "../src/runtime/adapter.js";
 import { RunnerError } from "../src/runtime/errors.js";
+import type { AgentExecutionRequest } from "../src/runtime/protocol.js";
 import { RunManager } from "../src/runtime/run-manager.js";
 
 class HttpTestAdapter implements RuntimeAdapter {
@@ -59,7 +63,7 @@ class HttpTestAdapter implements RuntimeAdapter {
   }
 }
 
-const validBody = {
+const validBody: AgentExecutionRequest = {
   runId: "run-http",
   agent: {
     id: "coo",
@@ -71,7 +75,9 @@ const validBody = {
   runtime: { type: "codex", model: null },
   thread: { runtimeThreadId: null },
   message: "Start",
+  context: [],
   mcpServers: [],
+  cwd: null,
 };
 
 const openServers = new Set<Server>();
@@ -79,8 +85,7 @@ const openServers = new Set<Server>();
 afterEach(async () => {
   await Promise.all(
     [...openServers].map(
-      (server) =>
-        new Promise<void>((resolve) => server.close(() => resolve())),
+      (server) => new Promise<void>((resolve) => server.close(() => resolve())),
     ),
   );
   openServers.clear();
@@ -128,7 +133,9 @@ describe("Runner HTTP API", () => {
       .post("/runs")
       .send(validBody)
       .expect(202, { runId: "run-http", status: "running" });
-    await vi.waitFor(() => expect(manager.status("run-http")).toBe("completed"));
+    await vi.waitFor(() =>
+      expect(manager.status("run-http")).toBe("completed"),
+    );
 
     const response = await request(server)
       .get("/runs/run-http/events")
@@ -139,6 +146,76 @@ describe("Runner HTTP API", () => {
     expect(response.text).toContain("event: thread.created");
     expect(response.text).toContain("event: assistant.completed");
     expect(response.text).toContain("event: run.completed");
+  });
+
+  it("attaches only to an existing run without creating a replacement", async () => {
+    const { server, manager } = await testApp();
+    await request(server).post("/runs").send(validBody).expect(202);
+    await vi.waitFor(() =>
+      expect(manager.status("run-http")).toBe("completed"),
+    );
+    await request(server)
+      .post("/runs/run-http/attach")
+      .expect(200, { runId: "run-http", status: "completed" });
+    await request(server)
+      .post("/runs/missing/attach")
+      .expect(404, {
+        error: { code: "RUN_NOT_FOUND", message: "Run was not found" },
+      });
+  });
+
+  it("returns 410 through HTTP after a restarted runner has only the durable tombstone", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "slab-runner-http-journal-"));
+    const journal = join(directory, "runs.jsonl");
+    try {
+      const firstAdapter = new HttpTestAdapter();
+      const firstManager = new RunManager(
+        new Map([[firstAdapter.id, firstAdapter]]),
+        new SilentLogger(),
+        50,
+        journal,
+      );
+      firstManager.create(validBody);
+      await vi.waitFor(() =>
+        expect(firstManager.status("run-http")).toBe("completed"),
+      );
+      await vi.waitFor(() =>
+        expect(firstManager.status("run-http")).toBeNull(),
+      );
+
+      const restartedAdapter = new HttpTestAdapter();
+      const restartedManager = new RunManager(
+        new Map([[restartedAdapter.id, restartedAdapter]]),
+        new SilentLogger(),
+        1,
+        journal,
+      );
+      const app = createHttpApp({
+        runManager: restartedManager,
+        adapters: [restartedAdapter],
+      });
+      const server = createServer(app);
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      openServers.add(server);
+
+      const expired = {
+        error: {
+          code: "RUN_HISTORY_EXPIRED",
+          message: "Run history is no longer available",
+        },
+      };
+      await request(server).post("/runs/run-http/attach").expect(410, expired);
+      await request(server).post("/runs").send(validBody).expect(410);
+      expect(restartedAdapter.cancelled).toEqual([]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("returns safe validation errors", async () => {
@@ -179,9 +256,11 @@ describe("Runner HTTP API", () => {
 
   it("returns 404 for unknown runs before opening SSE headers", async () => {
     const { server } = await testApp();
-    await request(server).get("/runs/missing/events").expect(404, {
-      error: { code: "RUN_NOT_FOUND", message: "Run was not found" },
-    });
+    await request(server)
+      .get("/runs/missing/events")
+      .expect(404, {
+        error: { code: "RUN_NOT_FOUND", message: "Run was not found" },
+      });
   });
 
   it("forwards approval decisions through the HTTP boundary", async () => {
@@ -218,7 +297,9 @@ describe("Runner HTTP API", () => {
       decision: "deny",
     });
     finishTurn();
-    await vi.waitFor(() => expect(manager.status("run-http")).toBe("completed"));
+    await vi.waitFor(() =>
+      expect(manager.status("run-http")).toBe("completed"),
+    );
   });
 
   it("forwards cancellation through the HTTP boundary", async () => {
@@ -237,6 +318,8 @@ describe("Runner HTTP API", () => {
     });
     expect(adapter.cancelled).toEqual(["run-http"]);
     rejectTurn(new RunnerError("RUN_CANCELLED", "Run was cancelled", 409));
-    await vi.waitFor(() => expect(manager.status("run-http")).toBe("cancelled"));
+    await vi.waitFor(() =>
+      expect(manager.status("run-http")).toBe("cancelled"),
+    );
   });
 });
