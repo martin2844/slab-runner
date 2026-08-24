@@ -139,3 +139,31 @@ count; consumers must not derive per-call initial or peak context from it.
 The loopback credential proxy applies a bounded upstream timeout and destroys
 active Anthropic requests when the downstream disconnects or Runner shuts
 down.
+
+## Direct API experimental adapter
+
+Direct API is a server-side tool loop for providers that expose either the
+OpenAI Responses API or an OpenAI-compatible Chat Completions API. The control
+plane supplies an operator-configured base URL, protocol, model, and write-only
+API key on the private Run request. The base URL and credential never become
+model input, MCP tool arguments, capability-snapshot metadata, or normalized
+events. Provider redirects are disabled.
+
+The adapter converts only the MCP servers assigned to that Run into provider
+function definitions. Provider function arguments are parsed as JSON objects;
+invalid arguments fail terminally and are never forwarded to MCP. MCP calls
+remain subject to the existing per-server approval policy, and every call is
+wrapped in exactly one normalized started/terminal lifecycle. The model cannot
+construct an arbitrary HTTP request through this adapter.
+
+Responses are requested with provider storage disabled. Chat continuity is
+implemented by control-plane conversation rehydration, while non-chat Runs
+remain fresh. The logical runtime thread ID is therefore audit identity rather
+than provider-side retained state.
+
+Usage is normalized once per provider model call. Hard token and priced cost
+limits are enforced at each reported usage boundary; a provider that omits
+usage fails closed when a hard limit is active. Direct API does not claim a
+native token or cost ceiling, and an upstream call can cross a limit before its
+terminal usage becomes observable. `mcpToolAllowlist` remains false because
+the model sees every tool exposed by each assigned MCP server.

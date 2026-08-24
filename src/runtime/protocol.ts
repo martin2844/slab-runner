@@ -54,6 +54,8 @@ export interface AgentExecutionRequest {
     authentication?: {
       mode: "api_key";
       credential: string;
+      baseUrl?: string | undefined;
+      apiFormat?: "responses" | "chat_completions" | undefined;
     } | null;
   };
   budget?: {
@@ -165,6 +167,20 @@ const canonicalRequestSchema = z.object({
       .object({
         mode: z.literal("api_key"),
         credential: z.string().min(16).max(16_384),
+        baseUrl: z
+          .string()
+          .url()
+          .max(2_048)
+          .refine((value) => {
+            const url = new URL(value);
+            return (
+              ["https:", "http:"].includes(url.protocol) &&
+              !url.username &&
+              !url.password
+            );
+          }, "Direct API URLs must use HTTP(S) without embedded credentials")
+          .optional(),
+        apiFormat: z.enum(["responses", "chat_completions"]).optional(),
       })
       .nullable()
       .default(null),

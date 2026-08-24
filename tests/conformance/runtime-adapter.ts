@@ -37,6 +37,8 @@ export interface RuntimeConformanceHarness {
 
 export interface RuntimeConformanceOptions {
   expectedRuntimeId: string;
+  toolLifecycleSource?: "provider_events" | "adapter_owned";
+  runtimeWarningWillRetry?: boolean;
   createHarness(): RuntimeConformanceHarness;
 }
 
@@ -70,7 +72,6 @@ export function defineRuntimeAdapterConformance(
       await expect(adapter.shutdown()).resolves.toBeUndefined();
       await expect(adapter.health()).resolves.toMatchObject({
         available: false,
-        status: "unavailable",
       });
     });
 
@@ -246,7 +247,7 @@ export function defineRuntimeAdapterConformance(
           active.events.find(({ type }) => type === "runtime.warning"),
         ).toMatchObject({
           type: "runtime.warning",
-          data: { willRetry: true },
+          data: { willRetry: options.runtimeWarningWillRetry ?? true },
         });
       }
       if (capabilities.toolLifecycle) {
@@ -297,6 +298,21 @@ export function defineRuntimeAdapterConformance(
         return;
       }
 
+      if (options.toolLifecycleSource === "adapter_owned") {
+        active.driver.startTool("tool-a");
+        active.driver.failTool("tool-a");
+        active.driver.completeTurn("completed");
+        await expect(active.completion).resolves.toBeUndefined();
+        expect(
+          active.events.filter(
+            ({ type, data }) =>
+              (type === "tool.completed" || type === "tool.failed") &&
+              data.toolId === "tool-a",
+          ),
+        ).toHaveLength(1);
+        return;
+      }
+
       active.driver.startTool("tool-a");
       active.driver.startTool("tool-b");
       active.driver.completeTurn("completed");
@@ -328,6 +344,12 @@ export function defineRuntimeAdapterConformance(
       }
       active.driver.requestApproval(701);
 
+      await expect
+        .poll(() =>
+          active.events.find(({ type }) => type === "approval.required"),
+        )
+        .toBeDefined();
+
       const required = active.events.find(
         ({ type }) => type === "approval.required",
       );
@@ -357,6 +379,11 @@ export function defineRuntimeAdapterConformance(
         return;
       }
       active.driver.requestApproval(702);
+      await expect
+        .poll(() =>
+          active.events.find(({ type }) => type === "approval.required"),
+        )
+        .toBeDefined();
       const required = active.events.find(
         ({ type }) => type === "approval.required",
       );

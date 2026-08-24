@@ -59,6 +59,51 @@ describe("parseExecutionRequest", () => {
     });
   });
 
+  it("accepts server-side Direct API endpoint metadata without URL credentials", () => {
+    const request = parseExecutionRequest({
+      runId: "run-direct",
+      agent: {
+        id: "sales",
+        name: "Sales",
+        role: "Sales",
+        instructions: "Operate safely.",
+        fullAccess: false,
+      },
+      runtime: {
+        type: "direct_api",
+        model: "gpt-test",
+        authentication: {
+          mode: "api_key",
+          credential: "direct-api-key-for-tests",
+          baseUrl: "https://provider.example.test/v1",
+          apiFormat: "responses",
+        },
+      },
+      thread: { runtimeThreadId: null },
+      message: "Test direct API.",
+      context: [],
+      mcpServers: [],
+      cwd: null,
+    });
+
+    expect(request.runtime.authentication).toMatchObject({
+      baseUrl: "https://provider.example.test/v1",
+      apiFormat: "responses",
+    });
+    expect(() =>
+      parseExecutionRequest({
+        ...request,
+        runtime: {
+          ...request.runtime,
+          authentication: {
+            ...request.runtime.authentication,
+            baseUrl: "https://user:password@provider.example.test/v1",
+          },
+        },
+      }),
+    ).toThrow(/embedded credentials/i);
+  });
+
   it("accepts the current control-plane aliases without exposing them downstream", () => {
     const request = parseExecutionRequest({
       run_id: "run-legacy",

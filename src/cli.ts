@@ -3,6 +3,7 @@
 import { createServer, type Server } from "node:http";
 import { CodexAdapter } from "./adapters/codex-adapter.js";
 import { ClaudeAdapter } from "./adapters/claude-adapter.js";
+import { DirectApiAdapter } from "./adapters/direct-api-adapter.js";
 import { prepareIsolatedCodexHome } from "./app-server/codex-home.js";
 import { ProcessAppServerConnection } from "./app-server/process-connection.js";
 import { loadConfig } from "./config.js";
@@ -49,6 +50,7 @@ async function main(): Promise<void> {
   const adapters = [
     new CodexAdapter(connection, config.safeCwd),
     new ClaudeAdapter(config.safeCwd),
+    new DirectApiAdapter(),
   ];
   for (const adapter of adapters) {
     try {
