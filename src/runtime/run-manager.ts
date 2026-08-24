@@ -250,7 +250,7 @@ export class RunManager {
       [...this.adapters.values()].map(async (adapter) => {
         let timeout: NodeJS.Timeout | undefined;
         const health = await Promise.race([
-          adapter.health(),
+          Promise.resolve().then(() => adapter.health()),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
               () => reject(new Error("Runtime health check timed out.")),

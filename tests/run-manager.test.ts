@@ -152,6 +152,26 @@ describe("RunManager", () => {
     ]);
   });
 
+  it("sanitizes an adapter health check that throws synchronously", async () => {
+    const adapter = new FakeRuntimeAdapter();
+    adapter.health = () => {
+      throw new Error("synchronous private provider failure");
+    };
+    const manager = new RunManager(
+      new Map([[adapter.definition.id, adapter]]),
+      new SilentLogger(),
+    );
+
+    await expect(manager.runtimes()).resolves.toEqual([
+      expect.objectContaining({
+        ...TEST_RUNTIME_DEFINITION,
+        available: false,
+        status: "unavailable",
+        reasonCode: "health_check_failed",
+      }),
+    ]);
+  });
+
   it("terminalizes a run when runtime context profiling fails", async () => {
     const { adapter, manager } = managerWith();
     adapter.contextProfileFailure = true;
