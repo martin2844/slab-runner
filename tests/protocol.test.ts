@@ -30,6 +30,33 @@ describe("parseExecutionRequest", () => {
     );
     expect(request.context).toEqual([]);
     expect(request.agent.fullAccess).toBe(true);
+    expect(request.budget).toBeNull();
+  });
+
+  it("validates bounded run budgets without requiring pricing", () => {
+    const request = parseExecutionRequest({
+      runId: "run-budget",
+      agent: {
+        id: "coo",
+        name: "COO",
+        role: "Operations",
+        instructions: "Operate within the admitted budget.",
+      },
+      runtime: { type: "claude", model: "claude-test" },
+      budget: {
+        maxTokens: 25_000,
+        maxCostUsd: 2.5,
+        pricing: null,
+      },
+      thread: { runtimeThreadId: null },
+      message: "Review operations",
+      mcpServers: [],
+    });
+    expect(request.budget).toEqual({
+      maxTokens: 25_000,
+      maxCostUsd: 2.5,
+      pricing: null,
+    });
   });
 
   it("accepts the current control-plane aliases without exposing them downstream", () => {

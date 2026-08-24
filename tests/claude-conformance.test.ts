@@ -39,9 +39,8 @@ class FakeCredentialBoundary implements ClaudeCredentialBoundary {
 
 class FakeQueryDriver {
   readonly #messages: SDKMessage[] = [];
-  readonly #waiters: Array<
-    (value: IteratorResult<SDKMessage, void>) => void
-  > = [];
+  readonly #waiters: Array<(value: IteratorResult<SDKMessage, void>) => void> =
+    [];
   #ended = false;
   #cancelled = false;
   #turnStarted = false;
@@ -260,6 +259,26 @@ class FakeQueryDriver {
     this.end();
   }
 
+  completeWithBudgetError(): void {
+    this.push({
+      type: "result",
+      subtype: "error_max_budget_usd",
+      duration_ms: 25,
+      duration_api_ms: 20,
+      is_error: true,
+      num_turns: 1,
+      stop_reason: null,
+      total_cost_usd: 2,
+      usage: {},
+      modelUsage: {},
+      permission_denials: [],
+      errors: ["Maximum budget reached"],
+      uuid: "budget-error-result",
+      session_id: "conformance-thread",
+    } as unknown as SDKMessage);
+    this.end();
+  }
+
   set usageEnabled(value: boolean) {
     this.#usageEnabled = value;
   }
@@ -315,8 +334,7 @@ defineRuntimeAdapterConformance("Claude", {
         hangNextHealthProbe() {},
         waitForTurnStart: () => provider.waitForTurnStart(),
         emitAssistantDelta: (text) => provider.emitAssistantDelta(text),
-        emitAssistantCompleted: (text) =>
-          provider.emitAssistantCompleted(text),
+        emitAssistantCompleted: (text) => provider.emitAssistantCompleted(text),
         startTool: (toolId) => provider.startTool(toolId),
         completeTool: (toolId) => provider.completeTool(toolId),
         failTool: (toolId) => provider.completeTool(toolId, true),
@@ -326,8 +344,7 @@ defineRuntimeAdapterConformance("Claude", {
         emitWarning: (message, willRetry) =>
           provider.emitWarning(message, willRetry),
         requestApproval: (requestId) => provider.requestApproval(requestId),
-        approvalDecision: (requestId) =>
-          provider.approvalDecision(requestId),
+        approvalDecision: (requestId) => provider.approvalDecision(requestId),
         completeTurn: (status) => provider.completeTurn(status),
         async waitForCancellation() {
           await expect.poll(() => provider.cancelled).toBe(true);
@@ -349,7 +366,11 @@ defineRuntimeAdapterConformance("Claude", {
 it("keeps the Anthropic key outside the Claude child environment", async () => {
   const provider = new FakeQueryDriver();
   const boundary = new FakeCredentialBoundary();
-  const adapter = new ClaudeAdapter("/tmp/safe-runner-cwd", boundary, provider.factory);
+  const adapter = new ClaudeAdapter(
+    "/tmp/safe-runner-cwd",
+    boundary,
+    provider.factory,
+  );
   const apiKey = "sk-ant-real-secret-never-in-child";
   const request = executionRequest({
     runtime: {
@@ -378,6 +399,43 @@ it("keeps the Anthropic key outside the Claude child environment", async () => {
 
   provider.completeTurn("completed");
   await expect(completion).resolves.toBeUndefined();
+});
+
+it("passes admitted hard limits to Claude and returns a structured budget failure", async () => {
+  const provider = new FakeQueryDriver();
+  const adapter = new ClaudeAdapter(
+    "/tmp/safe-runner-cwd",
+    new FakeCredentialBoundary(),
+    provider.factory,
+  );
+  const request = executionRequest({
+    runtime: {
+      type: "claude",
+      model: "claude-test",
+      authentication: {
+        mode: "api_key",
+        credential: "anthropic-test-credential",
+      },
+    },
+    budget: {
+      maxTokens: 12_000,
+      maxCostUsd: 2,
+      pricing: null,
+    },
+  });
+  const runtimeThreadId = await adapter.startThread(request);
+  const completion = adapter.runTurn({
+    request,
+    runtimeThreadId,
+    emit: () => {},
+  });
+  await provider.waitForTurnStart();
+  expect(provider.options?.maxBudgetUsd).toBe(2);
+  expect(provider.options?.taskBudget).toEqual({ total: 12_000 });
+  provider.completeWithBudgetError();
+  await expect(completion).rejects.toMatchObject({
+    code: "RUNTIME_BUDGET_EXCEEDED",
+  });
 });
 
 it("resumes only the runtime thread explicitly supplied by the control plane", async () => {
@@ -502,28 +560,44 @@ it("settles SDK-aborted approvals exactly once", async () => {
   const preAborted = new AbortController();
   preAborted.abort();
   await expect(
-    callback!("Bash", {}, {
-      signal: preAborted.signal,
-      toolUseID: "pre-aborted",
-      requestId: "pre-aborted-request",
-    }),
+    callback!(
+      "Bash",
+      {},
+      {
+        signal: preAborted.signal,
+        toolUseID: "pre-aborted",
+        requestId: "pre-aborted-request",
+      },
+    ),
   ).resolves.toMatchObject({ behavior: "deny" });
-  expect(events.filter(({ type }) => type === "approval.required")).toHaveLength(0);
+  expect(
+    events.filter(({ type }) => type === "approval.required"),
+  ).toHaveLength(0);
 
   const controller = new AbortController();
-  const decision = callback!("Bash", {}, {
-    signal: controller.signal,
-    toolUseID: "aborted-after-required",
-    requestId: "aborted-request",
-  });
-  expect(events.filter(({ type }) => type === "approval.required")).toHaveLength(1);
+  const decision = callback!(
+    "Bash",
+    {},
+    {
+      signal: controller.signal,
+      toolUseID: "aborted-after-required",
+      requestId: "aborted-request",
+    },
+  );
+  expect(
+    events.filter(({ type }) => type === "approval.required"),
+  ).toHaveLength(1);
   controller.abort();
   await expect(decision).resolves.toMatchObject({ behavior: "deny" });
-  expect(events.filter(({ type }) => type === "approval.resolved")).toHaveLength(1);
+  expect(
+    events.filter(({ type }) => type === "approval.resolved"),
+  ).toHaveLength(1);
 
   provider.completeTurn("completed");
   await expect(completion).resolves.toBeUndefined();
-  expect(events.filter(({ type }) => type === "approval.resolved")).toHaveLength(1);
+  expect(
+    events.filter(({ type }) => type === "approval.resolved"),
+  ).toHaveLength(1);
 });
 
 it("marks Claude usage as a run aggregate with provider turn count", async () => {

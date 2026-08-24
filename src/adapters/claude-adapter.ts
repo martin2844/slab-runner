@@ -120,8 +120,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
 
   constructor(
     private readonly safeCwd: string,
-    private readonly credentialProxy: ClaudeCredentialBoundary =
-      new AnthropicCredentialProxy(),
+    private readonly credentialProxy: ClaudeCredentialBoundary = new AnthropicCredentialProxy(),
     private readonly queryFactory: ClaudeQueryFactory = createClaudeQuery,
   ) {}
 
@@ -351,9 +350,13 @@ export class ClaudeAdapter implements RuntimeAdapter {
       ...(run.request.runtime.model
         ? { model: run.request.runtime.model }
         : {}),
-      ...(fresh
-        ? { sessionId: runtimeThreadId }
-        : { resume: runtimeThreadId }),
+      ...(run.request.budget?.maxCostUsd
+        ? { maxBudgetUsd: run.request.budget.maxCostUsd }
+        : {}),
+      ...(run.request.budget?.maxTokens
+        ? { taskBudget: { total: run.request.budget.maxTokens } }
+        : {}),
+      ...(fresh ? { sessionId: runtimeThreadId } : { resume: runtimeThreadId }),
       mcpServers: Object.fromEntries(
         run.request.mcpServers.map((server) => [
           server.name,
@@ -420,9 +423,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
           allowed.add(`mcp__${server.name}__${tool}`);
         }
       }
-      for (const [tool, mode] of Object.entries(
-        server.approval?.tools ?? {},
-      )) {
+      for (const [tool, mode] of Object.entries(server.approval?.tools ?? {})) {
         const name = `mcp__${server.name}__${tool}`;
         if (mode === "approve") allowed.add(name);
         else allowed.delete(name);
@@ -525,7 +526,10 @@ export class ClaudeAdapter implements RuntimeAdapter {
     });
   }
 
-  private handleMessage(run: ActiveRun, message: SDKMessage): RunnerError | null {
+  private handleMessage(
+    run: ActiveRun,
+    message: SDKMessage,
+  ): RunnerError | null {
     if (message.type === "stream_event") {
       const event = message.event as unknown as Record<string, unknown>;
       const delta = this.record(event.delta);
@@ -593,6 +597,13 @@ export class ClaudeAdapter implements RuntimeAdapter {
     if (message.type === "result") {
       this.emitUsage(run, message);
       if (message.is_error || message.subtype !== "success") {
+        if (message.subtype === "error_max_budget_usd") {
+          return new RunnerError(
+            "RUNTIME_BUDGET_EXCEEDED",
+            "Claude stopped after reaching the run cost limit",
+            409,
+          );
+        }
         const details =
           message.subtype === "success"
             ? message.result
@@ -654,7 +665,8 @@ export class ClaudeAdapter implements RuntimeAdapter {
   }
 
   private finishTool(run: ActiveRun, block: Record<string, unknown>): void {
-    const toolId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+    const toolId =
+      typeof block.tool_use_id === "string" ? block.tool_use_id : "";
     if (!toolId || run.terminalToolIds.has(toolId)) return;
     const start = run.toolStarts.get(toolId);
     if (!start) return;
@@ -664,11 +676,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
     const measurement = measurePayload(response, run.redactor);
     const tool =
       typeof start.data.tool === "string" ? start.data.tool : "runtime_tool";
-    const summary = summarizeSearchTool(
-      tool,
-      start.argumentsValue,
-      response,
-    );
+    const summary = summarizeSearchTool(tool, start.argumentsValue, response);
     const data = {
       ...start.data,
       completedAt: completedAt.toISOString(),
@@ -722,7 +730,10 @@ export class ClaudeAdapter implements RuntimeAdapter {
       contextWindow: usage.contextWindow,
       costUsd: usage.costUSD,
     }));
-    const inputTokens = models.reduce((total, item) => total + item.inputTokens, 0);
+    const inputTokens = models.reduce(
+      (total, item) => total + item.inputTokens,
+      0,
+    );
     const cachedInputTokens = models.reduce(
       (total, item) => total + item.cachedInputTokens,
       0,
@@ -743,8 +754,10 @@ export class ClaudeAdapter implements RuntimeAdapter {
       reasoningOutputTokens: 0,
       totalTokens: inputTokens + outputTokens,
       modelContextWindow:
-        models.reduce((maximum, item) => Math.max(maximum, item.contextWindow), 0) ||
-        null,
+        models.reduce(
+          (maximum, item) => Math.max(maximum, item.contextWindow),
+          0,
+        ) || null,
       totalCostUsd: message.total_cost_usd,
       durationMs: message.duration_ms,
       modelUsage: models,

@@ -56,6 +56,16 @@ export interface AgentExecutionRequest {
       credential: string;
     } | null;
   };
+  budget?: {
+    maxTokens: number | null;
+    maxCostUsd: number | null;
+    pricing: {
+      version: number;
+      inputUsdPerMillion: number;
+      cachedInputUsdPerMillion: number;
+      outputUsdPerMillion: number;
+    } | null;
+  } | null;
   thread: {
     runtimeThreadId: string | null;
   };
@@ -159,6 +169,21 @@ const canonicalRequestSchema = z.object({
       .nullable()
       .default(null),
   }),
+  budget: z
+    .object({
+      maxTokens: z.number().int().positive().max(10_000_000_000).nullable(),
+      maxCostUsd: z.number().positive().max(1_000_000).nullable(),
+      pricing: z
+        .object({
+          version: z.number().int().positive(),
+          inputUsdPerMillion: z.number().nonnegative(),
+          cachedInputUsdPerMillion: z.number().nonnegative(),
+          outputUsdPerMillion: z.number().nonnegative(),
+        })
+        .nullable(),
+    })
+    .nullable()
+    .default(null),
   thread: z.object({
     runtimeThreadId: z.string().trim().min(1).max(500).nullable(),
   }),
@@ -230,6 +255,7 @@ function normalizeExecutionRequest(input: unknown): unknown {
       model: rawRuntime.model ?? raw.model ?? null,
       authentication: rawRuntime.authentication ?? null,
     },
+    budget: raw.budget ?? null,
     thread: {
       runtimeThreadId:
         rawThread.runtimeThreadId ??
