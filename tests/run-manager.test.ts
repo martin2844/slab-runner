@@ -11,10 +11,16 @@ import type {
 import { RunnerError } from "../src/runtime/errors.js";
 import { RunManager } from "../src/runtime/run-manager.js";
 import { executionRequest } from "./helpers/fixtures.js";
+import {
+  TEST_RUNTIME_DEFINITION,
+  testRuntimeHealth,
+} from "./helpers/runtime.js";
 
 class FakeRuntimeAdapter implements RuntimeAdapter {
-  readonly id = "codex";
+  readonly definition = TEST_RUNTIME_DEFINITION;
   available = true;
+  healthFailure = false;
+  contextProfileFailure = false;
   threadStart: () => Promise<string> = () => Promise.resolve("thread-created");
   turn: (context: RuntimeTurnContext) => Promise<void> = (context) => {
     context.emit("assistant.delta", { delta: "Hello" });
@@ -33,10 +39,12 @@ class FakeRuntimeAdapter implements RuntimeAdapter {
   }
 
   health(): Promise<RuntimeHealth> {
-    return Promise.resolve({ id: this.id, available: this.available });
+    if (this.healthFailure) return Promise.reject(new Error("health failed"));
+    return Promise.resolve(testRuntimeHealth(this.available));
   }
 
   contextProfile() {
+    if (this.contextProfileFailure) throw new Error("profile failed");
     return { runtime: "codex", initialUserInput: { approxTokens: 4 } };
   }
 
@@ -75,7 +83,7 @@ function managerWith(adapter = new FakeRuntimeAdapter()) {
   return {
     adapter,
     manager: new RunManager(
-      new Map<string, RuntimeAdapter>([[adapter.id, adapter]]),
+      new Map<string, RuntimeAdapter>([[adapter.definition.id, adapter]]),
       new SilentLogger(),
       60_000,
     ),
@@ -83,13 +91,87 @@ function managerWith(adapter = new FakeRuntimeAdapter()) {
 }
 
 describe("RunManager", () => {
+  it("rejects a registry whose key disagrees with the adapter identity", () => {
+    const adapter = new FakeRuntimeAdapter();
+
+    expect(
+      () =>
+        new RunManager(
+          new Map([["different-runtime", adapter]]),
+          new SilentLogger(),
+        ),
+    ).toThrow(
+      "Runtime registry key different-runtime does not match adapter codex.",
+    );
+  });
+
+  it("does not durably consume a run ID for an unregistered runtime", () => {
+    const { manager } = managerWith();
+
+    expect(() =>
+      manager.create(
+        executionRequest({ runtime: { type: "claude", model: null } }),
+      ),
+    ).toThrow("Requested runtime is unavailable");
+    expect(manager.has("run-1")).toBe(false);
+    expect(manager.wasSeen("run-1")).toBe(false);
+  });
+
+  it("keeps runtime identity available when dynamic health inspection fails", async () => {
+    const { adapter, manager } = managerWith();
+    adapter.healthFailure = true;
+
+    await expect(manager.runtimes()).resolves.toEqual([
+      expect.objectContaining({
+        ...TEST_RUNTIME_DEFINITION,
+        available: false,
+        status: "unavailable",
+        reasonCode: "health_check_failed",
+      }),
+    ]);
+  });
+
+  it("bounds runtime health inspection when an adapter stops responding", async () => {
+    const adapter = new FakeRuntimeAdapter();
+    adapter.health = () => new Promise(() => {});
+    const manager = new RunManager(
+      new Map([[adapter.definition.id, adapter]]),
+      new SilentLogger(),
+      60_000,
+      undefined,
+      5,
+    );
+
+    await expect(manager.runtimes()).resolves.toEqual([
+      expect.objectContaining({
+        ...TEST_RUNTIME_DEFINITION,
+        available: false,
+        status: "unavailable",
+        reasonCode: "health_check_failed",
+      }),
+    ]);
+  });
+
+  it("terminalizes a run when runtime context profiling fails", async () => {
+    const { adapter, manager } = managerWith();
+    adapter.contextProfileFailure = true;
+
+    manager.create(executionRequest());
+    await vi.waitFor(() => expect(manager.status("run-1")).toBe("failed"));
+    expect(
+      manager
+        .openEventStream("run-1", 0, () => {})
+        .events.map(({ type }) => type),
+    ).toEqual(["run.started", "run.failed"]);
+  });
+
   it("persists run identities and refuses re-execution after in-memory history expires", async () => {
     const directory = mkdtempSync(join(tmpdir(), "slab-runner-journal-"));
     const journal = join(directory, "runs.jsonl");
     try {
       const firstAdapter = new FakeRuntimeAdapter();
       const first = new RunManager(
-        new Map([[firstAdapter.id, firstAdapter]]),
+        new Map([[firstAdapter.definition.id, firstAdapter]]),
         new SilentLogger(),
         50,
         journal,
@@ -110,7 +192,7 @@ describe("RunManager", () => {
 
       const restartedAdapter = new FakeRuntimeAdapter();
       const restarted = new RunManager(
-        new Map([[restartedAdapter.id, restartedAdapter]]),
+        new Map([[restartedAdapter.definition.id, restartedAdapter]]),
         new SilentLogger(),
         50,
         journal,
@@ -134,7 +216,7 @@ describe("RunManager", () => {
     try {
       const firstAdapter = new FakeRuntimeAdapter();
       const first = new RunManager(
-        new Map([[firstAdapter.id, firstAdapter]]),
+        new Map([[firstAdapter.definition.id, firstAdapter]]),
         new SilentLogger(),
         60_000,
         journal,
@@ -145,7 +227,7 @@ describe("RunManager", () => {
       );
 
       const restarted = new RunManager(
-        new Map([[firstAdapter.id, firstAdapter]]),
+        new Map([[firstAdapter.definition.id, firstAdapter]]),
         new SilentLogger(),
         60_000,
         journal,
@@ -177,7 +259,7 @@ describe("RunManager", () => {
       );
       const adapter = new FakeRuntimeAdapter();
       const manager = new RunManager(
-        new Map([[adapter.id, adapter]]),
+        new Map([[adapter.definition.id, adapter]]),
         new SilentLogger(),
         60_000,
         journal,
@@ -206,7 +288,7 @@ describe("RunManager", () => {
       );
       const adapter = new FakeRuntimeAdapter();
       const recovered = new RunManager(
-        new Map([[adapter.id, adapter]]),
+        new Map([[adapter.definition.id, adapter]]),
         new SilentLogger(),
         60_000,
         journal,
@@ -225,7 +307,7 @@ describe("RunManager", () => {
       ).not.toThrow();
 
       const restarted = new RunManager(
-        new Map([[adapter.id, adapter]]),
+        new Map([[adapter.definition.id, adapter]]),
         new SilentLogger(),
         60_000,
         journal,
@@ -250,7 +332,7 @@ describe("RunManager", () => {
       );
       const adapter = new FakeRuntimeAdapter();
       const recovered = new RunManager(
-        new Map([[adapter.id, adapter]]),
+        new Map([[adapter.definition.id, adapter]]),
         new SilentLogger(),
         60_000,
         journal,
@@ -262,7 +344,7 @@ describe("RunManager", () => {
       );
 
       const restarted = new RunManager(
-        new Map([[adapter.id, adapter]]),
+        new Map([[adapter.definition.id, adapter]]),
         new SilentLogger(),
         60_000,
         journal,
@@ -303,7 +385,7 @@ describe("RunManager", () => {
       );
       const adapter = new FakeRuntimeAdapter();
       const manager = new RunManager(
-        new Map([[adapter.id, adapter]]),
+        new Map([[adapter.definition.id, adapter]]),
         new SilentLogger(),
         60_000,
         journal,
@@ -344,6 +426,11 @@ describe("RunManager", () => {
       "run.completed",
     ]);
     expect(stream.events.map(({ id }) => id)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(stream.events[0]?.data).toMatchObject({
+      runtime: "codex",
+      runtimeDefinition: TEST_RUNTIME_DEFINITION,
+      agentId: "coo",
+    });
   });
 
   it("retains a complete replay window beyond two thousand events", async () => {
@@ -406,7 +493,7 @@ describe("RunManager", () => {
       );
       const adapter = new FakeRuntimeAdapter();
       const manager = new RunManager(
-        new Map([[adapter.id, adapter]]),
+        new Map([[adapter.definition.id, adapter]]),
         new SilentLogger(),
         60_000,
         journal,

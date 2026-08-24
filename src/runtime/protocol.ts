@@ -49,7 +49,7 @@ export interface AgentExecutionRequest {
     fullAccess: boolean;
   };
   runtime: {
-    type: "codex";
+    type: string;
     model: string | null;
   };
   thread: {
@@ -137,7 +137,15 @@ const canonicalRequestSchema = z.object({
     fullAccess: z.boolean().default(false),
   }),
   runtime: z.object({
-    type: z.literal("codex"),
+    type: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .regex(
+        /^[a-z0-9][a-z0-9_-]*$/,
+        "Runtime IDs must use lowercase letters, numbers, underscores, or hyphens",
+      ),
     model: z.string().trim().min(1).max(200).nullable(),
   }),
   thread: z.object({

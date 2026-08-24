@@ -5,7 +5,6 @@ import express, {
   type Response,
 } from "express";
 import { ZodError } from "zod";
-import type { RuntimeAdapter } from "../runtime/adapter.js";
 import { publicError, RunnerError } from "../runtime/errors.js";
 import {
   approvalDecisionSchema,
@@ -36,7 +35,6 @@ function sendEvent(response: Response, event: RunnerEvent): void {
 
 export function createHttpApp(options: {
   runManager: RunManager;
-  adapters: RuntimeAdapter[];
   runnerToken?: string;
 }) {
   const app = express();
@@ -63,16 +61,7 @@ export function createHttpApp(options: {
 
   app.get("/runtimes", async (_request, response, next) => {
     try {
-      const data = await Promise.all(
-        options.adapters.map(async (adapter) => {
-          try {
-            return await adapter.health();
-          } catch {
-            return { id: adapter.id, available: false };
-          }
-        }),
-      );
-      response.json({ data });
+      response.json({ data: await options.runManager.runtimes() });
     } catch (error) {
       next(error);
     }

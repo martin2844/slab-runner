@@ -52,14 +52,13 @@ async function main(): Promise<void> {
     logger.warn("runtime unavailable at startup", { runtime: "codex" });
   }
   const runManager = new RunManager(
-    new Map([[adapter.id, adapter]]),
+    new Map([[adapter.definition.id, adapter]]),
     logger,
     undefined,
     config.runJournalFile,
   );
   const app = createHttpApp({
     runManager,
-    adapters: [adapter],
     ...(config.runnerToken ? { runnerToken: config.runnerToken } : {}),
   });
   const server = createServer(app);

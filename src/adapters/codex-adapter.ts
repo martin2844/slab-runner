@@ -14,6 +14,8 @@ import {
 } from "../lib/observability.js";
 import type {
   RuntimeAdapter,
+  RuntimeAuthMode,
+  RuntimeDefinition,
   RuntimeEventSink,
   RuntimeHealth,
   RuntimeTurnContext,
@@ -106,8 +108,30 @@ const MCP_SERVER_ALIASES: Record<string, keyof typeof READ_ONLY_MCP_TOOLS> = {
   email: "email",
 };
 
+export const CODEX_RUNTIME_DEFINITION = {
+  id: "codex",
+  displayName: "Codex",
+  stability: "stable",
+  authModes: ["chatgpt", "api_key", "cloud_provider"],
+  capabilities: {
+    freshThreads: true,
+    threadResume: true,
+    mcpServers: true,
+    mcpToolAllowlist: false,
+    toolApprovals: true,
+    toolLifecycle: true,
+    runtimeWarnings: true,
+    usageReporting: true,
+    cancellation: true,
+    modelSelection: true,
+    modelDiscovery: false,
+    modelValidation: false,
+    contextProfiling: true,
+  },
+} satisfies RuntimeDefinition;
+
 export class CodexAdapter implements RuntimeAdapter {
-  readonly id = "codex";
+  readonly definition = CODEX_RUNTIME_DEFINITION;
   readonly #runs = new Map<string, ActiveRun>();
   readonly #runByThread = new Map<string, ActiveRun>();
   readonly #captureFullToolPayloads =
@@ -131,8 +155,15 @@ export class CodexAdapter implements RuntimeAdapter {
   }
 
   async health(): Promise<RuntimeHealth> {
+    const checkedAt = new Date().toISOString();
     if (!this.connection.ready) {
-      return { id: this.id, available: false };
+      return {
+        available: false,
+        status: "unavailable",
+        reasonCode: "not_started",
+        authentication: { status: "unknown", mode: null },
+        checkedAt,
+      };
     }
 
     try {
@@ -140,9 +171,33 @@ export class CodexAdapter implements RuntimeAdapter {
         refreshToken: false,
       });
       const account = this.readAccount(result);
-      return { id: this.id, available: account !== null };
+      if (!account) {
+        return {
+          available: false,
+          status: "authentication_required",
+          reasonCode: "authentication_required",
+          authentication: { status: "required", mode: null },
+          checkedAt,
+        };
+      }
+      return {
+        available: true,
+        status: "available",
+        reasonCode: "ready",
+        authentication: {
+          status: "authenticated",
+          mode: this.accountAuthMode(account),
+        },
+        checkedAt,
+      };
     } catch {
-      return { id: this.id, available: false };
+      return {
+        available: false,
+        status: "unavailable",
+        reasonCode: "health_check_failed",
+        authentication: { status: "unknown", mode: null },
+        checkedAt,
+      };
     }
   }
 
@@ -329,7 +384,7 @@ export class CodexAdapter implements RuntimeAdapter {
     const safeConfigText = JSON.stringify(safeConfiguration);
 
     return {
-      runtime: this.id,
+      runtime: this.definition.id,
       estimator: "characters_divided_by_4",
       developerInstructionsTotal: metric(developerInstructions),
       agentInstructionsProvided: metric(suppliedInstructions),
@@ -388,6 +443,23 @@ export class CodexAdapter implements RuntimeAdapter {
       );
     }
     return account as Record<string, unknown>;
+  }
+
+  private accountAuthMode(account: Record<string, unknown>): RuntimeAuthMode {
+    switch (account.type) {
+      case "chatgpt":
+        return "chatgpt";
+      case "apiKey":
+        return "api_key";
+      case "amazonBedrock":
+        return "cloud_provider";
+      default:
+        throw new RunnerError(
+          "RUNTIME_UNAVAILABLE",
+          "Codex returned an unsupported account type",
+          503,
+        );
+    }
   }
 
   private threadParams(
@@ -615,6 +687,8 @@ export class CodexAdapter implements RuntimeAdapter {
     const responseValue = this.toolResponse(item);
     const argumentsMeasurement = measurePayload(argumentsValue, run.redactor);
     const responseMeasurement = measurePayload(responseValue, run.redactor);
+    const succeeded =
+      lifecycle === "completed" ? this.toolSucceeded(item) : null;
     const searchSummary =
       lifecycle === "completed"
         ? summarizeSearchTool(tool, argumentsValue, responseValue)
@@ -652,7 +726,8 @@ export class CodexAdapter implements RuntimeAdapter {
             ...(responseMeasurement.preview
               ? { responsePreview: responseMeasurement.preview }
               : {}),
-            success: this.toolSucceeded(item),
+            success: succeeded,
+            ...(!succeeded ? { reason: "provider_reported_failure" } : {}),
             ...(searchSummary
               ? {
                   searchQuery: searchSummary.query,
@@ -691,7 +766,11 @@ export class CodexAdapter implements RuntimeAdapter {
     const safeData = this.safeRecord(run, data);
     if (lifecycle === "started" && trackedStart) trackedStart.data = safeData;
     run.emit(
-      lifecycle === "started" ? "tool.started" : "tool.completed",
+      lifecycle === "started"
+        ? "tool.started"
+        : succeeded
+          ? "tool.completed"
+          : "tool.failed",
       safeData,
     );
     if (lifecycle === "completed") {
@@ -742,11 +821,26 @@ export class CodexAdapter implements RuntimeAdapter {
   }
 
   private toolSucceeded(item: Record<string, unknown>): boolean {
-    if (item.type === "commandExecution") {
-      return item.status === "completed" && item.exitCode === 0;
+    switch (item.type) {
+      case "commandExecution":
+        return item.status === "completed" && item.exitCode === 0;
+      case "mcpToolCall":
+        return item.status === "completed" && !item.error;
+      case "dynamicToolCall":
+        return typeof item.success === "boolean"
+          ? item.success
+          : item.status === "completed";
+      case "fileChange":
+      case "collabAgentToolCall":
+        return item.status === "completed";
+      case "webSearch":
+      case "imageView":
+        return true;
+      case "imageGeneration":
+        return item.status !== "failed" && item.failure === null;
+      default:
+        return false;
     }
-    if (typeof item.success === "boolean") return item.success;
-    return item.status === "completed" && !item.error;
   }
 
   private number(value: unknown): number {

@@ -101,7 +101,34 @@ GET /runtimes
 
 ```json
 {
-  "data": [{ "id": "codex", "available": true }]
+  "data": [
+    {
+      "id": "codex",
+      "displayName": "Codex",
+      "stability": "stable",
+      "authModes": ["chatgpt", "api_key", "cloud_provider"],
+      "capabilities": {
+        "freshThreads": true,
+        "threadResume": true,
+        "mcpServers": true,
+        "mcpToolAllowlist": false,
+        "toolApprovals": true,
+        "toolLifecycle": true,
+        "runtimeWarnings": true,
+        "usageReporting": true,
+        "cancellation": true,
+        "modelSelection": true,
+        "modelDiscovery": false,
+        "modelValidation": false,
+        "contextProfiling": true
+      },
+      "available": true,
+      "status": "available",
+      "reasonCode": "ready",
+      "authentication": { "status": "authenticated", "mode": "chatgpt" },
+      "checkedAt": "2026-08-24T08:00:00.000Z"
+    }
+  ]
 }
 ```
 
@@ -161,7 +188,10 @@ The response is immediate:
 { "runId": "run_123", "status": "running" }
 ```
 
-Only the control-plane server names `work`, `docs`, and `posthog` are accepted in the MVP. Credentials are forwarded to Codex as MCP HTTP headers, held in memory for the active run, and redacted from normalized events and logs.
+Runner accepts up to eight uniquely named HTTP(S) MCP servers selected by the
+control plane for that run. Credentials are forwarded to the selected runtime
+as MCP HTTP headers, held in memory for the active run, and redacted from
+normalized events and logs.
 
 For a new thread, omit `runtimeThreadId` or set it to `null`. Runner emits `thread.created`; the control plane must store its `runtimeThreadId` and send it with the next run. Runner never becomes the source of truth for that mapping.
 
@@ -187,11 +217,14 @@ data: {"id":3,"type":"assistant.delta","runId":"run_123","timestamp":"...","data
 The normalized event types are:
 
 - `run.started`
+- `context.bootstrap`
 - `thread.created`
 - `assistant.delta`
 - `assistant.completed`
 - `tool.started`
 - `tool.completed`
+- `tool.failed`
+- `runtime.warning`
 - `approval.required`
 - `approval.resolved`
 - `usage.updated`
@@ -272,6 +305,8 @@ npm run build
 Normal tests use a deterministic app-server transport double and do not consume Codex quota. See [TESTING.md](./TESTING.md) for conventions.
 
 The complete product requirements are preserved in [docs/PRD.md](./docs/PRD.md).
+Runtime-provider invariants and the adapter onboarding path are documented in
+[docs/runtime-adapter-contract.md](./docs/runtime-adapter-contract.md).
 
 The main module boundaries are:
 
@@ -280,4 +315,6 @@ The main module boundaries are:
 - `src/runtime`: public protocol, run state, approvals, and event replay
 - `src/http`: loopback HTTP and SSE API
 
-Future Kimi, Claude, OpenAI API, or Anthropic API support should implement `RuntimeAdapter` without changing the HTTP contract or normalized event names.
+Future Kimi, Claude, OpenAI API, or Anthropic API support must implement
+`RuntimeAdapter` and pass the shared conformance suite without changing the HTTP
+contract or normalized event names.

@@ -1,4 +1,9 @@
-import type { RuntimeAdapter, RuntimeEventSink } from "./adapter.js";
+import {
+  unavailableRuntimeHealth,
+  type RuntimeAdapter,
+  type RuntimeEventSink,
+  type RuntimeSummary,
+} from "./adapter.js";
 import { normalizeRuntimeError, publicError, RunnerError } from "./errors.js";
 import type {
   AgentExecutionRequest,
@@ -69,13 +74,23 @@ export class RunManager {
   readonly #runs = new Map<string, ManagedRun>();
   readonly #seenRunIds = new Set<string>();
   readonly #restartableRunIds = new Set<string>();
+  private readonly adapters: ReadonlyMap<string, RuntimeAdapter>;
 
   constructor(
-    private readonly adapters: Map<string, RuntimeAdapter>,
+    adapters: ReadonlyMap<string, RuntimeAdapter>,
     private readonly logger: Logger,
     private readonly retentionMs = 15 * 60 * 1_000,
     private readonly journalFile?: string,
+    private readonly healthTimeoutMs = 5_000,
   ) {
+    for (const [runtimeId, adapter] of adapters) {
+      if (runtimeId !== adapter.definition.id) {
+        throw new Error(
+          `Runtime registry key ${runtimeId} does not match adapter ${adapter.definition.id}.`,
+        );
+      }
+    }
+    this.adapters = new Map(adapters);
     if (journalFile && existsSync(journalFile)) {
       const histories = new Map<string, RunnerEvent[]>();
       let journalBuffer = readFileSync(journalFile);
@@ -198,6 +213,7 @@ export class RunManager {
         410,
       );
     }
+    this.requireAdapter(request.runtime.type);
     if (!this.#restartableRunIds.delete(request.runId)) {
       this.recordRunIdentity(request.runId);
     }
@@ -227,6 +243,28 @@ export class RunManager {
 
   status(runId: string): RunStatus | null {
     return this.#runs.get(runId)?.status ?? null;
+  }
+
+  async runtimes(): Promise<RuntimeSummary[]> {
+    return Promise.all(
+      [...this.adapters.values()].map(async (adapter) => {
+        let timeout: NodeJS.Timeout | undefined;
+        const health = await Promise.race([
+          adapter.health(),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error("Runtime health check timed out.")),
+              this.healthTimeoutMs,
+            );
+          }),
+        ])
+          .catch(() => unavailableRuntimeHealth())
+          .finally(() => {
+            if (timeout) clearTimeout(timeout);
+          });
+        return { ...health, ...adapter.definition };
+      }),
+    );
   }
 
   openEventStream(
@@ -312,12 +350,13 @@ export class RunManager {
     });
     this.emit(run, "run.started", {
       runtime: request.runtime.type,
+      runtimeDefinition: adapter.definition,
       agentId: request.agent.id,
     });
-    if (adapter.contextProfile) {
-      this.emit(run, "context.bootstrap", adapter.contextProfile(request));
-    }
     try {
+      if (adapter.contextProfile) {
+        this.emit(run, "context.bootstrap", adapter.contextProfile(request));
+      }
       const isNewThread = request.thread.runtimeThreadId === null;
       const runtimeThreadId = isNewThread
         ? await adapter.startThread(request)

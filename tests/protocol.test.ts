@@ -154,7 +154,7 @@ describe("parseExecutionRequest", () => {
   });
 
   it.each([
-    [{ runtime: { type: "claude" } }],
+    [{ runtime: { type: "Claude API" } }],
     [
       {
         mcpServers: [

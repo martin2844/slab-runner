@@ -29,9 +29,11 @@ describe("CodexAdapter", () => {
     connection.ready = false;
     const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
 
-    await expect(adapter.health()).resolves.toEqual({
-      id: "codex",
+    await expect(adapter.health()).resolves.toMatchObject({
       available: false,
+      status: "unavailable",
+      reasonCode: "not_started",
+      authentication: { status: "unknown", mode: null },
     });
     expect(connection.requests).toEqual([]);
   });
@@ -45,9 +47,11 @@ describe("CodexAdapter", () => {
     };
     const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
 
-    await expect(adapter.health()).resolves.toEqual({
-      id: "codex",
+    await expect(adapter.health()).resolves.toMatchObject({
       available: false,
+      status: "authentication_required",
+      reasonCode: "authentication_required",
+      authentication: { status: "required", mode: null },
     });
   });
 
@@ -60,9 +64,44 @@ describe("CodexAdapter", () => {
       });
     const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
 
-    await expect(adapter.health()).resolves.toEqual({
-      id: "codex",
+    await expect(adapter.health()).resolves.toMatchObject({
       available: true,
+      status: "available",
+      reasonCode: "ready",
+      authentication: { status: "authenticated", mode: "chatgpt" },
+    });
+  });
+
+  it.each([
+    ["chatgpt", "chatgpt"],
+    ["apiKey", "api_key"],
+    ["amazonBedrock", "cloud_provider"],
+  ] as const)(
+    "maps the Codex %s account to the normalized %s auth mode",
+    async (accountType, mode) => {
+      const connection = new FakeAppServerConnection();
+      connection.requestHandler = () =>
+        Promise.resolve({ account: { type: accountType } });
+      const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+
+      await expect(adapter.health()).resolves.toMatchObject({
+        available: true,
+        authentication: { status: "authenticated", mode },
+      });
+    },
+  );
+
+  it("fails health closed for an unknown Codex account type", async () => {
+    const connection = new FakeAppServerConnection();
+    connection.requestHandler = () =>
+      Promise.resolve({ account: { type: "future-provider" } });
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+
+    await expect(adapter.health()).resolves.toMatchObject({
+      available: false,
+      status: "unavailable",
+      reasonCode: "health_check_failed",
+      authentication: { status: "unknown", mode: null },
     });
   });
 
@@ -71,15 +110,17 @@ describe("CodexAdapter", () => {
     const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
 
     connection.requestHandler = () => Promise.reject(new Error("rpc failed"));
-    await expect(adapter.health()).resolves.toEqual({
-      id: "codex",
+    await expect(adapter.health()).resolves.toMatchObject({
       available: false,
+      status: "unavailable",
+      reasonCode: "health_check_failed",
     });
 
     connection.requestHandler = () => Promise.resolve({});
-    await expect(adapter.health()).resolves.toEqual({
-      id: "codex",
+    await expect(adapter.health()).resolves.toMatchObject({
       available: false,
+      status: "unavailable",
+      reasonCode: "health_check_failed",
     });
   });
 
@@ -389,6 +430,81 @@ describe("CodexAdapter", () => {
     });
   });
 
+  it("treats status-less Codex read tools as successful when they complete", async () => {
+    const { connection, events, completion } = await activeTurn();
+    for (const item of [
+      {
+        type: "webSearch",
+        id: "search-1",
+        query: "Slab runtime adapter",
+        action: null,
+        results: [],
+      },
+      {
+        type: "imageView",
+        id: "image-1",
+        path: "/tmp/screenshot.png",
+      },
+    ]) {
+      connection.serverNotification({
+        method: "item/started",
+        params: { threadId: "thread-1", turnId: "turn-1", item },
+      });
+      connection.serverNotification({
+        method: "item/completed",
+        params: { threadId: "thread-1", turnId: "turn-1", item },
+      });
+    }
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+
+    await completion;
+    expect(
+      events
+        .filter(({ type }) => type === "tool.completed")
+        .map(({ data }) => [data.toolId, data.success]),
+    ).toEqual([
+      ["search-1", true],
+      ["image-1", true],
+    ]);
+    expect(events.some(({ type }) => type === "tool.failed")).toBe(false);
+  });
+
+  it("uses the native image-generation failure field for terminal status", async () => {
+    const { connection, events, completion } = await activeTurn();
+    connection.serverNotification({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "imageGeneration",
+          id: "image-generation-1",
+          status: "failed",
+          revisedPrompt: null,
+          result: "",
+          failure: { message: "generation failed" },
+        },
+      },
+    });
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+
+    await completion;
+    expect(events.find(({ type }) => type === "tool.failed")).toMatchObject({
+      type: "tool.failed",
+      data: {
+        toolId: "image-generation-1",
+        success: false,
+        reason: "provider_reported_failure",
+      },
+    });
+  });
+
   it("fails a started tool when the turn ends without a terminal item", async () => {
     const { connection, events, completion } = await activeTurn();
     connection.serverNotification({
@@ -676,20 +792,21 @@ describe("CodexAdapter", () => {
     });
 
     await completion;
-    const completedEvent = events.find(({ type }) => type === "tool.completed");
-    expect(completedEvent?.data).toMatchObject({
+    const failedEvent = events.find(({ type }) => type === "tool.failed");
+    expect(failedEvent?.data).toMatchObject({
       server: "runtime",
       tool: "shell",
       exitCode: 1,
       success: false,
+      reason: "provider_reported_failure",
       streamBreakdownAvailable: false,
       stdoutBytes: null,
       stderrBytes: null,
     });
-    expect(String(completedEvent?.data.command)).toContain("[REDACTED]");
-    expect(typeof completedEvent?.data.outputBytes).toBe("number");
-    expect(typeof completedEvent?.data.outputApproxTokens).toBe("number");
-    expect(JSON.stringify(completedEvent)).not.toContain("work-secret");
+    expect(String(failedEvent?.data.command)).toContain("[REDACTED]");
+    expect(typeof failedEvent?.data.outputBytes).toBe("number");
+    expect(typeof failedEvent?.data.outputApproxTokens).toBe("number");
+    expect(JSON.stringify(failedEvent)).not.toContain("work-secret");
   });
 
   it("reports only controlled bootstrap sizes without prompt contents or secrets", () => {

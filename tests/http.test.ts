@@ -14,9 +14,13 @@ import type {
 import { RunnerError } from "../src/runtime/errors.js";
 import type { AgentExecutionRequest } from "../src/runtime/protocol.js";
 import { RunManager } from "../src/runtime/run-manager.js";
+import {
+  TEST_RUNTIME_DEFINITION,
+  testRuntimeHealth,
+} from "./helpers/runtime.js";
 
 class HttpTestAdapter implements RuntimeAdapter {
-  readonly id = "codex";
+  readonly definition = TEST_RUNTIME_DEFINITION;
   cancelled: string[] = [];
   approvals: Array<{
     runId: string;
@@ -36,7 +40,7 @@ class HttpTestAdapter implements RuntimeAdapter {
     return Promise.resolve();
   }
   health(): Promise<RuntimeHealth> {
-    return Promise.resolve({ id: this.id, available: true });
+    return Promise.resolve(testRuntimeHealth());
   }
   startThread(): Promise<string> {
     return Promise.resolve("thread-http");
@@ -94,12 +98,11 @@ afterEach(async () => {
 async function testApp(runnerToken?: string) {
   const adapter = new HttpTestAdapter();
   const manager = new RunManager(
-    new Map<string, RuntimeAdapter>([[adapter.id, adapter]]),
+    new Map<string, RuntimeAdapter>([[adapter.definition.id, adapter]]),
     new SilentLogger(),
   );
   const app = createHttpApp({
     runManager: manager,
-    adapters: [adapter],
     ...(runnerToken ? { runnerToken } : {}),
   });
   const server = createServer(app);
@@ -122,9 +125,15 @@ describe("Runner HTTP API", () => {
   it("reports health and runtime availability", async () => {
     const { server } = await testApp();
     await request(server).get("/health").expect(200, { status: "ok" });
-    await request(server)
-      .get("/runtimes")
-      .expect(200, { data: [{ id: "codex", available: true }] });
+    const response = await request(server).get("/runtimes").expect(200);
+    expect(response.body).toEqual({
+      data: [
+        {
+          ...TEST_RUNTIME_DEFINITION,
+          ...testRuntimeHealth(),
+        },
+      ],
+    });
   });
 
   it("creates a run immediately and exposes replayable SSE events", async () => {
@@ -170,7 +179,7 @@ describe("Runner HTTP API", () => {
     try {
       const firstAdapter = new HttpTestAdapter();
       const firstManager = new RunManager(
-        new Map([[firstAdapter.id, firstAdapter]]),
+        new Map([[firstAdapter.definition.id, firstAdapter]]),
         new SilentLogger(),
         50,
         journal,
@@ -185,14 +194,13 @@ describe("Runner HTTP API", () => {
 
       const restartedAdapter = new HttpTestAdapter();
       const restartedManager = new RunManager(
-        new Map([[restartedAdapter.id, restartedAdapter]]),
+        new Map([[restartedAdapter.definition.id, restartedAdapter]]),
         new SilentLogger(),
         1,
         journal,
       );
       const app = createHttpApp({
         runManager: restartedManager,
-        adapters: [restartedAdapter],
       });
       const server = createServer(app);
       await new Promise<void>((resolve, reject) => {
@@ -218,11 +226,26 @@ describe("Runner HTTP API", () => {
     }
   });
 
-  it("returns safe validation errors", async () => {
+  it("returns a safe unavailable error for a valid but unregistered runtime", async () => {
     const { server } = await testApp();
     const response = await request(server)
       .post("/runs")
       .send({ ...validBody, runtime: { type: "claude" } })
+      .expect(503);
+    expect(response.body).toMatchObject({
+      error: {
+        code: "RUNTIME_UNAVAILABLE",
+        message: "Requested runtime is unavailable",
+      },
+    });
+    expect(JSON.stringify(response.body)).not.toContain("stack");
+  });
+
+  it("returns safe validation errors for malformed runtime IDs", async () => {
+    const { server } = await testApp();
+    const response = await request(server)
+      .post("/runs")
+      .send({ ...validBody, runtime: { type: "Claude API" } })
       .expect(400);
     expect(response.body).toMatchObject({
       error: { code: "INVALID_REQUEST", message: "Request validation failed" },

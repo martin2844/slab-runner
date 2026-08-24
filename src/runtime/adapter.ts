@@ -1,8 +1,68 @@
 import type { AgentExecutionRequest, NormalizedEventType } from "./protocol.js";
 
+export const runtimeCapabilityKeys = [
+  "freshThreads",
+  "threadResume",
+  "mcpServers",
+  "mcpToolAllowlist",
+  "toolApprovals",
+  "toolLifecycle",
+  "runtimeWarnings",
+  "usageReporting",
+  "cancellation",
+  "modelSelection",
+  "modelDiscovery",
+  "modelValidation",
+  "contextProfiling",
+] as const;
+
+export type RuntimeCapability = (typeof runtimeCapabilityKeys)[number];
+export type RuntimeCapabilities = Record<RuntimeCapability, boolean>;
+export type RuntimeAuthMode =
+  | "none"
+  | "chatgpt"
+  | "api_key"
+  | "oauth"
+  | "cloud_provider";
+
+export interface RuntimeDefinition {
+  readonly id: string;
+  readonly displayName: string;
+  readonly stability: "stable" | "experimental";
+  readonly authModes: readonly RuntimeAuthMode[];
+  readonly capabilities: Readonly<RuntimeCapabilities>;
+}
+
+export type RuntimeHealthStatus =
+  | "available"
+  | "authentication_required"
+  | "unavailable";
+
 export interface RuntimeHealth {
-  id: string;
   available: boolean;
+  status: RuntimeHealthStatus;
+  reasonCode:
+    | "ready"
+    | "not_started"
+    | "authentication_required"
+    | "health_check_failed";
+  authentication: {
+    status: "authenticated" | "required" | "unknown";
+    mode: RuntimeAuthMode | null;
+  };
+  checkedAt: string;
+}
+
+export type RuntimeSummary = RuntimeDefinition & RuntimeHealth;
+
+export function unavailableRuntimeHealth(): RuntimeHealth {
+  return {
+    available: false,
+    status: "unavailable",
+    reasonCode: "health_check_failed",
+    authentication: { status: "unknown", mode: null },
+    checkedAt: new Date().toISOString(),
+  };
 }
 
 export type RuntimeEventSink = (
@@ -19,7 +79,7 @@ export interface RuntimeTurnContext {
 export type RuntimeContextProfile = Record<string, unknown>;
 
 export interface RuntimeAdapter {
-  readonly id: string;
+  readonly definition: RuntimeDefinition;
   start(): Promise<void>;
   health(): Promise<RuntimeHealth>;
   contextProfile?(request: AgentExecutionRequest): RuntimeContextProfile;
