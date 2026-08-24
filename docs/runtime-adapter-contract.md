@@ -30,7 +30,9 @@ experimental adapter from a stable adapter with the complete operational set.
 Health is dynamic and separate from identity. It reports availability,
 authentication state, a bounded reason code, and the check timestamp. Health
 responses must not contain account PII, tokens, provider payloads, or stack
-traces.
+traces. Runner supplies an abort signal to bound probes; adapters must pass it
+to their provider transport so a timed-out check releases pending resources and
+a later probe can recover.
 
 An adapter that requires no provider authentication declares `none`; an empty
 authentication-mode list is not an implicit no-auth mode.
@@ -56,6 +58,12 @@ continuity and does not persist thread mappings.
 The adapter must use only the MCP servers and approval configuration supplied
 in the run request. It may not add globally configured servers or expose
 credentials in normalized events. MCP capability is a per-run snapshot.
+
+Runner owns `run.*`, `thread.created`, and `context.bootstrap`. Adapters may
+emit only assistant, tool, runtime-warning, approval, and usage events through
+`RuntimeEventSink`. Runner rejects an adapter that attempts to spoof its
+manager-owned lifecycle so in-memory status, durable history, and replay cannot
+diverge.
 
 ## Normalized invariants
 

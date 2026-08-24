@@ -8,15 +8,20 @@ defineRuntimeAdapterConformance("Codex", {
   expectedRuntimeId: "codex",
   createHarness() {
     const connection = new FakeAppServerConnection();
+    let hangNextHealthProbe = false;
     connection.requestHandler = (method, params) => {
       if (method === "account/read") {
+        if (hangNextHealthProbe) {
+          hangNextHealthProbe = false;
+          return new Promise(() => {});
+        }
         return Promise.resolve({
           account: { type: "chatgpt", email: "operator@example.test" },
           requiresOpenaiAuth: true,
         });
       }
       if (method === "thread/start") {
-        return Promise.resolve({ thread: { id: "fresh-runtime-thread" } });
+        return Promise.resolve({ thread: { id: "conformance-thread" } });
       }
       if (method === "thread/resume") {
         const threadId = (params as { threadId?: unknown }).threadId;
@@ -35,6 +40,9 @@ defineRuntimeAdapterConformance("Codex", {
         runtime: { type: "codex", model: "conformance-model" },
       }),
       driver: {
+        hangNextHealthProbe() {
+          hangNextHealthProbe = true;
+        },
         async waitForTurnStart() {
           await expect
             .poll(() =>

@@ -1,7 +1,9 @@
 import {
+  runtimeAdapterEventTypes,
   unavailableRuntimeHealth,
   type RuntimeAdapter,
   type RuntimeEventSink,
+  type RuntimeHealth,
   type RuntimeSummary,
 } from "./adapter.js";
 import { normalizeRuntimeError, publicError, RunnerError } from "./errors.js";
@@ -47,6 +49,11 @@ interface ManagedRun {
   pendingApprovalIds: Set<string>;
 }
 
+interface RuntimeHealthProbe {
+  promise: Promise<RuntimeHealth>;
+  controller: AbortController;
+}
+
 export interface EventStreamSnapshot {
   events: RunnerEvent[];
   terminal: boolean;
@@ -70,10 +77,13 @@ const TERMINAL_STATUSES = new Set<RunStatus>([
   "cancelled",
 ]);
 
+const RUNTIME_ADAPTER_EVENT_TYPES = new Set<string>(runtimeAdapterEventTypes);
+
 export class RunManager {
   readonly #runs = new Map<string, ManagedRun>();
   readonly #seenRunIds = new Set<string>();
   readonly #restartableRunIds = new Set<string>();
+  readonly #healthChecks = new Map<string, RuntimeHealthProbe>();
   private readonly adapters: ReadonlyMap<string, RuntimeAdapter>;
 
   constructor(
@@ -249,13 +259,17 @@ export class RunManager {
     return Promise.all(
       [...this.adapters.values()].map(async (adapter) => {
         let timeout: NodeJS.Timeout | undefined;
+        const probe = this.runtimeHealth(adapter);
         const health = await Promise.race([
-          Promise.resolve().then(() => adapter.health()),
+          probe.promise,
           new Promise<never>((_, reject) => {
-            timeout = setTimeout(
-              () => reject(new Error("Runtime health check timed out.")),
-              this.healthTimeoutMs,
-            );
+            timeout = setTimeout(() => {
+              if (this.#healthChecks.get(adapter.definition.id) === probe) {
+                this.#healthChecks.delete(adapter.definition.id);
+              }
+              probe.controller.abort();
+              reject(new Error("Runtime health check timed out."));
+            }, this.healthTimeoutMs);
           }),
         ])
           .catch(() => unavailableRuntimeHealth())
@@ -374,7 +388,15 @@ export class RunManager {
         this.logger.info("run cancelled", { runId: request.runId });
         return;
       }
+      let adapterProtocolViolation = false;
+      let adapterEventsOpen = true;
       const sink: RuntimeEventSink = (type, data = {}) => {
+        if (!adapterEventsOpen || TERMINAL_STATUSES.has(run.status)) return;
+        if (!RUNTIME_ADAPTER_EVENT_TYPES.has(type)) {
+          adapterProtocolViolation = true;
+          adapterEventsOpen = false;
+          return;
+        }
         if (
           type === "approval.required" &&
           typeof data.approvalId === "string"
@@ -395,7 +417,18 @@ export class RunManager {
         }
         this.emit(run, type, data);
       };
-      await adapter.runTurn({ request, runtimeThreadId, emit: sink });
+      try {
+        await adapter.runTurn({ request, runtimeThreadId, emit: sink });
+      } finally {
+        adapterEventsOpen = false;
+      }
+      if (adapterProtocolViolation) {
+        throw new RunnerError(
+          "UNKNOWN_RUNTIME_ERROR",
+          "Runtime adapter violated the normalized event protocol",
+          502,
+        );
+      }
       if (run.cancelRequested) {
         run.status = "cancelled";
         this.emit(run, "run.cancelled", {
@@ -578,5 +611,25 @@ export class RunManager {
       );
     }
     return adapter;
+  }
+
+  private runtimeHealth(adapter: RuntimeAdapter): RuntimeHealthProbe {
+    const runtimeId = adapter.definition.id;
+    const existing = this.#healthChecks.get(runtimeId);
+    if (existing) return existing;
+
+    const controller = new AbortController();
+    const probe: RuntimeHealthProbe = {
+      controller,
+      promise: Promise.resolve().then(() => adapter.health(controller.signal)),
+    };
+    probe.promise = probe.promise
+      .finally(() => {
+        if (this.#healthChecks.get(runtimeId) === probe) {
+          this.#healthChecks.delete(runtimeId);
+        }
+      });
+    this.#healthChecks.set(runtimeId, probe);
+    return probe;
   }
 }

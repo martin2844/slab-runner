@@ -65,8 +65,23 @@ export function unavailableRuntimeHealth(): RuntimeHealth {
   };
 }
 
+export const runtimeAdapterEventTypes = [
+  "assistant.delta",
+  "assistant.completed",
+  "tool.started",
+  "tool.completed",
+  "tool.failed",
+  "runtime.warning",
+  "approval.required",
+  "approval.resolved",
+  "usage.updated",
+] as const satisfies readonly NormalizedEventType[];
+
+export type RuntimeAdapterEventType =
+  (typeof runtimeAdapterEventTypes)[number];
+
 export type RuntimeEventSink = (
-  type: NormalizedEventType,
+  type: RuntimeAdapterEventType,
   data?: Record<string, unknown>,
 ) => void;
 
@@ -81,7 +96,7 @@ export type RuntimeContextProfile = Record<string, unknown>;
 export interface RuntimeAdapter {
   readonly definition: RuntimeDefinition;
   start(): Promise<void>;
-  health(): Promise<RuntimeHealth>;
+  health(signal?: AbortSignal): Promise<RuntimeHealth>;
   contextProfile?(request: AgentExecutionRequest): RuntimeContextProfile;
   startThread(request: AgentExecutionRequest): Promise<string>;
   resumeThread(request: AgentExecutionRequest): Promise<string>;

@@ -1,6 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface, type Interface as ReadLineInterface } from "node:readline";
-import { BaseAppServerConnection, type RpcId } from "./connection.js";
+import {
+  BaseAppServerConnection,
+  type RpcId,
+  type RpcRequestOptions,
+} from "./connection.js";
 import { RunnerError } from "../runtime/errors.js";
 import type { Logger } from "../lib/logger.js";
 
@@ -91,20 +95,53 @@ export class ProcessAppServerConnection extends BaseAppServerConnection {
     });
   }
 
-  request(method: string, params: unknown = {}): Promise<unknown> {
+  request(
+    method: string,
+    params: unknown = {},
+    options: RpcRequestOptions = {},
+  ): Promise<unknown> {
     if (!this.#ready && method !== "initialize") {
       return Promise.reject(
         new RunnerError("RUNTIME_UNAVAILABLE", "Codex runtime is unavailable", 503),
       );
     }
+    if (options.signal?.aborted) {
+      return Promise.reject(
+        new RunnerError("RUNTIME_UNAVAILABLE", "Runtime request was cancelled", 503),
+      );
+    }
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      const cleanup = () => options.signal?.removeEventListener("abort", abort);
+      const pending: PendingRequest = {
+        resolve(value) {
+          cleanup();
+          resolve(value);
+        },
+        reject(error) {
+          cleanup();
+          reject(error);
+        },
+      };
+      const abort = () => {
+        if (!this.#pending.delete(id)) return;
+        pending.reject(
+          new RunnerError(
+            "RUNTIME_UNAVAILABLE",
+            "Runtime request was cancelled",
+            503,
+          ),
+        );
+      };
+      this.#pending.set(id, pending);
+      options.signal?.addEventListener("abort", abort, { once: true });
       try {
         this.send({ method, id, params });
       } catch (error) {
         this.#pending.delete(id);
-        reject(error instanceof Error ? error : new Error("RPC write failed"));
+        pending.reject(
+          error instanceof Error ? error : new Error("RPC write failed"),
+        );
       }
     });
   }

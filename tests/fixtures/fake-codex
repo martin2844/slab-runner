@@ -30,6 +30,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.method === "crash") {
     process.exit(17);
   }
+  if (message.method === "hang") return;
   process.stdout.write(
     `${JSON.stringify({ id: message.id, result: message.params ?? {} })}\n`,
   );

@@ -74,4 +74,26 @@ describe("ProcessAppServerConnection", () => {
       restarted: true,
     });
   });
+
+  it("abandons an aborted RPC request and remains usable", async () => {
+    const connection = new ProcessAppServerConnection(
+      fakeCodex,
+      new SilentLogger(),
+      isolatedCodexHome(),
+    );
+    connections.push(connection);
+    await connection.start();
+    const controller = new AbortController();
+
+    const request = connection.request("hang", {}, { signal: controller.signal });
+    controller.abort();
+
+    await expect(request).rejects.toMatchObject({
+      code: "RUNTIME_UNAVAILABLE",
+      message: "Runtime request was cancelled",
+    });
+    await expect(connection.request("echo", { recovered: true })).resolves.toEqual({
+      recovered: true,
+    });
+  });
 });

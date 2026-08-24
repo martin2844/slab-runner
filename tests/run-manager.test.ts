@@ -38,7 +38,8 @@ class FakeRuntimeAdapter implements RuntimeAdapter {
     return Promise.resolve();
   }
 
-  health(): Promise<RuntimeHealth> {
+  health(signal?: AbortSignal): Promise<RuntimeHealth> {
+    void signal;
     if (this.healthFailure) return Promise.reject(new Error("health failed"));
     return Promise.resolve(testRuntimeHealth(this.available));
   }
@@ -152,6 +153,37 @@ describe("RunManager", () => {
     ]);
   });
 
+  it("retires timed-out health probes so a later check can recover", async () => {
+    const adapter = new FakeRuntimeAdapter();
+    let healthCalls = 0;
+    adapter.health = (signal) => {
+      healthCalls += 1;
+      if (healthCalls > 1) return Promise.resolve(testRuntimeHealth());
+      return new Promise<RuntimeHealth>((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new Error("Health probe aborted")),
+          { once: true },
+        );
+      });
+    };
+    const manager = new RunManager(
+      new Map([[adapter.definition.id, adapter]]),
+      new SilentLogger(),
+      60_000,
+      undefined,
+      5,
+    );
+
+    await manager.runtimes();
+    expect(healthCalls).toBe(1);
+
+    await expect(manager.runtimes()).resolves.toEqual([
+      expect.objectContaining({ available: true, status: "available" }),
+    ]);
+    expect(healthCalls).toBe(2);
+  });
+
   it("sanitizes an adapter health check that throws synchronously", async () => {
     const adapter = new FakeRuntimeAdapter();
     adapter.health = () => {
@@ -183,6 +215,69 @@ describe("RunManager", () => {
         .openEventStream("run-1", 0, () => {})
         .events.map(({ type }) => type),
     ).toEqual(["run.started", "run.failed"]);
+  });
+
+  it("rejects manager-owned events emitted by a runtime adapter", async () => {
+    const { adapter, manager } = managerWith();
+    adapter.turn = (context) => {
+      const unsafeEmit = context.emit as unknown as (
+        type: string,
+        data?: Record<string, unknown>,
+      ) => void;
+      for (const type of [
+        "context.bootstrap",
+        "approval.required",
+        "thread.created",
+        "run.completed",
+        "run.failed",
+      ]) {
+        unsafeEmit(type, { spoofed: true });
+      }
+      return Promise.resolve();
+    };
+
+    manager.create(executionRequest());
+    await vi.waitFor(() => expect(manager.status("run-1")).toBe("failed"));
+
+    const events = manager.openEventStream("run-1", 0, () => {}).events;
+    expect(events.map(({ type }) => type)).toEqual([
+      "run.started",
+      "context.bootstrap",
+      "thread.created",
+      "run.failed",
+    ]);
+    expect(
+      events.filter(({ type }) =>
+        ["run.completed", "run.failed", "run.cancelled"].includes(type),
+      ),
+    ).toHaveLength(1);
+    expect(events.some(({ data }) => data.spoofed === true)).toBe(false);
+    expect(events.at(-1)?.data).toMatchObject({
+      error: {
+        code: "UNKNOWN_RUNTIME_ERROR",
+        message: "Runtime adapter violated the normalized event protocol",
+      },
+    });
+  });
+
+  it("ignores adapter events after the turn has settled", async () => {
+    const { adapter, manager } = managerWith();
+    const late = { emit: null as RuntimeTurnContext["emit"] | null };
+    adapter.turn = (context) => {
+      late.emit = context.emit;
+      return Promise.resolve();
+    };
+
+    manager.create(executionRequest());
+    await vi.waitFor(() => expect(manager.status("run-1")).toBe("completed"));
+    const eventsBefore = manager.openEventStream("run-1", 0, () => {}).events;
+
+    late.emit?.("approval.required", { approvalId: "late-approval" });
+
+    expect(manager.status("run-1")).toBe("completed");
+    expect(manager.openEventStream("run-1", 0, () => {}).events).toEqual(
+      eventsBefore,
+    );
   });
 
   it("persists run identities and refuses re-execution after in-memory history expires", async () => {

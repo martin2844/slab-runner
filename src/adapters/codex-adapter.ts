@@ -69,6 +69,7 @@ const TOOL_ITEM_TYPES = new Set([
   "webSearch",
   "imageView",
   "imageGeneration",
+  "sleep",
 ]);
 
 const READ_ONLY_MCP_TOOLS: Record<string, readonly string[]> = {
@@ -154,7 +155,7 @@ export class CodexAdapter implements RuntimeAdapter {
     await this.connection.start();
   }
 
-  async health(): Promise<RuntimeHealth> {
+  async health(signal?: AbortSignal): Promise<RuntimeHealth> {
     const checkedAt = new Date().toISOString();
     if (!this.connection.ready) {
       return {
@@ -167,9 +168,11 @@ export class CodexAdapter implements RuntimeAdapter {
     }
 
     try {
-      const result = await this.connection.request("account/read", {
-        refreshToken: false,
-      });
+      const result = await this.connection.request(
+        "account/read",
+        { refreshToken: false },
+        signal ? { signal } : {},
+      );
       const account = this.readAccount(result);
       if (!account) {
         return {
@@ -809,6 +812,7 @@ export class CodexAdapter implements RuntimeAdapter {
 
   private toolArguments(item: Record<string, unknown>): unknown {
     if (item.type === "commandExecution") return item.command ?? "";
+    if (item.type === "sleep") return { durationMs: item.durationMs };
     if ("arguments" in item) return item.arguments;
     return null;
   }
@@ -835,6 +839,7 @@ export class CodexAdapter implements RuntimeAdapter {
         return item.status === "completed";
       case "webSearch":
       case "imageView":
+      case "sleep":
         return true;
       case "imageGeneration":
         return item.status !== "failed" && item.failure === null;
@@ -860,6 +865,7 @@ export class CodexAdapter implements RuntimeAdapter {
       webSearch: "web_search",
       imageView: "image_view",
       imageGeneration: "image_generation",
+      sleep: "clock.sleep",
       collabAgentToolCall: "agent_collaboration",
     };
     return typeof item.type === "string"

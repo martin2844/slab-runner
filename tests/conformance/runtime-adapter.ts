@@ -11,6 +11,7 @@ import type {
 type CapturedEvent = Pick<RunnerEvent, "type" | "data">;
 
 export interface RuntimeConformanceDriver {
+  hangNextHealthProbe(): void;
   waitForTurnStart(): Promise<void>;
   emitAssistantDelta(text: string): void;
   emitAssistantCompleted(text: string): void;
@@ -110,6 +111,29 @@ export function defineRuntimeAdapterConformance(
       );
     });
 
+    it("settles a provider health probe when its abort signal fires", async () => {
+      const { adapter, driver } = options.createHarness();
+      driver.hangNextHealthProbe();
+      const controller = new AbortController();
+      let timeout: NodeJS.Timeout | undefined;
+      const probe = adapter.health(controller.signal).then(
+        () => true,
+        () => true,
+      );
+
+      controller.abort();
+      const settled = await Promise.race([
+        probe,
+        new Promise<false>((resolve) => {
+          timeout = setTimeout(() => resolve(false), 100);
+        }),
+      ]).finally(() => {
+        if (timeout) clearTimeout(timeout);
+      });
+
+      expect(settled).toBe(true);
+    });
+
     it("supports fresh and resumed runtime threads through the same interface", async () => {
       const { adapter, driver, request } = options.createHarness();
       const expectedOperations: Array<"start" | "resume"> = [];
@@ -137,7 +161,25 @@ export function defineRuntimeAdapterConformance(
       const harness = options.createHarness();
       const capabilities = harness.adapter.definition.capabilities;
       if (!capabilities.mcpServers && !capabilities.modelSelection) return;
-      await harness.adapter.startThread(harness.request);
+      const executionRequest = capabilities.freshThreads
+        ? harness.request
+        : capabilities.threadResume
+          ? {
+              ...harness.request,
+              thread: { runtimeThreadId: "conformance-thread" },
+            }
+          : harness.request;
+      const runtimeThreadId = capabilities.freshThreads
+        ? await harness.adapter.startThread(executionRequest)
+        : capabilities.threadResume
+          ? await harness.adapter.resumeThread(executionRequest)
+          : "conformance-thread";
+      const completion = harness.adapter.runTurn({
+        request: executionRequest,
+        runtimeThreadId,
+        emit: () => {},
+      });
+      await harness.driver.waitForTurnStart();
 
       if (capabilities.mcpServers) {
         expect(harness.driver.configuredMcpServers().sort()).toEqual(
@@ -149,6 +191,8 @@ export function defineRuntimeAdapterConformance(
           harness.request.runtime.model,
         );
       }
+      harness.driver.completeTurn("completed");
+      await expect(completion).resolves.toBeUndefined();
     });
 
     it("profiles runtime bootstrap without exposing run inputs or credentials", () => {

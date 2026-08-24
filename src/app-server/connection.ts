@@ -11,11 +11,19 @@ export interface RpcServerRequest extends RpcNotification {
   id: RpcId;
 }
 
+export interface RpcRequestOptions {
+  signal?: AbortSignal;
+}
+
 export interface AppServerConnection {
   readonly ready: boolean;
   start(): Promise<void>;
   stop(): Promise<void>;
-  request(method: string, params?: unknown): Promise<unknown>;
+  request(
+    method: string,
+    params?: unknown,
+    options?: RpcRequestOptions,
+  ): Promise<unknown>;
   notify(method: string, params?: unknown): void;
   respond(id: RpcId, result: unknown): void;
   on(event: "notification", listener: (message: RpcNotification) => void): this;
@@ -31,7 +39,11 @@ export abstract class BaseAppServerConnection
   abstract readonly ready: boolean;
   abstract start(): Promise<void>;
   abstract stop(): Promise<void>;
-  abstract request(method: string, params?: unknown): Promise<unknown>;
+  abstract request(
+    method: string,
+    params?: unknown,
+    options?: RpcRequestOptions,
+  ): Promise<unknown>;
   abstract notify(method: string, params?: unknown): void;
   abstract respond(id: RpcId, result: unknown): void;
 }

@@ -445,6 +445,11 @@ describe("CodexAdapter", () => {
         id: "image-1",
         path: "/tmp/screenshot.png",
       },
+      {
+        type: "sleep",
+        id: "sleep-1",
+        durationMs: 250,
+      },
     ]) {
       connection.serverNotification({
         method: "item/started",
@@ -468,7 +473,20 @@ describe("CodexAdapter", () => {
     ).toEqual([
       ["search-1", true],
       ["image-1", true],
+      ["sleep-1", true],
     ]);
+    expect(
+      events.find(
+        ({ type, data }) =>
+          type === "tool.started" && data.toolId === "sleep-1",
+      ),
+    ).toMatchObject({
+      data: {
+        name: "clock.sleep",
+        tool: "clock.sleep",
+        argumentsPreview: '{"durationMs":250}',
+      },
+    });
     expect(events.some(({ type }) => type === "tool.failed")).toBe(false);
   });
 

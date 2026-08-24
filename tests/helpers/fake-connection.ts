@@ -2,6 +2,7 @@ import {
   BaseAppServerConnection,
   type RpcId,
   type RpcNotification,
+  type RpcRequestOptions,
   type RpcServerRequest,
 } from "../../src/app-server/connection.js";
 
@@ -37,9 +38,30 @@ export class FakeAppServerConnection extends BaseAppServerConnection {
     return Promise.resolve();
   }
 
-  request(method: string, params: unknown = {}): Promise<unknown> {
+  request(
+    method: string,
+    params: unknown = {},
+    options: RpcRequestOptions = {},
+  ): Promise<unknown> {
+    const signal = options.signal;
+    if (signal?.aborted) return Promise.reject(new Error("Request aborted"));
     this.requests.push({ method, params });
-    return this.requestHandler(method, params);
+    const response = this.requestHandler(method, params);
+    if (!signal) return response;
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(new Error("Request aborted"));
+      signal.addEventListener("abort", abort, { once: true });
+      response.then(
+        (value) => {
+          signal.removeEventListener("abort", abort);
+          resolve(value);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", abort);
+          reject(error instanceof Error ? error : new Error("Request failed"));
+        },
+      );
+    });
   }
 
   notify(method: string, params: unknown = {}): void {
