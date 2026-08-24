@@ -23,8 +23,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - run: docker build --build-arg CODEX_VERSION=0.148.0 --tag slab-runner:ci .
+      - run: docker build --build-arg CODEX_VERSION=0.148.0 --build-arg GEMINI_CLI_VERSION=0.56.0 --tag slab-runner:ci .
       - env:
           SLAB_RUNNER_SMOKE_IMAGE: slab-runner:ci
           CODEX_VERSION: "0.148.0"
+          GEMINI_CLI_VERSION: "0.56.0"
         run: ./scripts/container-smoke.sh

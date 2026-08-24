@@ -4,9 +4,11 @@ set -eu
 image=${SLAB_RUNNER_SMOKE_IMAGE:-slab-runner:smoke}
 port=${SLAB_RUNNER_SMOKE_PORT:-39690}
 expected_codex_version=${CODEX_VERSION:-0.148.0}
+expected_gemini_version=${GEMINI_CLI_VERSION:-0.56.0}
 suffix=${GITHUB_RUN_ID:-local}-$$
 container=slab-runner-smoke-$suffix
 volume=slab-runner-smoke-codex-$suffix
+gemini_volume=slab-runner-smoke-gemini-$suffix
 temporary_directory=$(mktemp -d)
 token_file=$temporary_directory/runner-token
 runner_token=testing-only-runner-token-0123456789abcdef
@@ -14,6 +16,7 @@ runner_token=testing-only-runner-token-0123456789abcdef
 cleanup() {
   docker rm --force "$container" >/dev/null 2>&1 || true
   docker volume rm "$volume" >/dev/null 2>&1 || true
+  docker volume rm "$gemini_volume" >/dev/null 2>&1 || true
   rm -rf "$temporary_directory"
 }
 trap cleanup EXIT HUP INT TERM
@@ -21,11 +24,13 @@ trap cleanup EXIT HUP INT TERM
 printf '%s\n' "$runner_token" > "$token_file"
 chmod 444 "$token_file"
 docker volume create "$volume" >/dev/null
+docker volume create "$gemini_volume" >/dev/null
 
 docker run --detach \
   --name "$container" \
   --publish "127.0.0.1:${port}:6990" \
   --volume "$volume:/var/lib/slab-runner/codex" \
+  --volume "$gemini_volume:/var/lib/slab-runner/gemini" \
   --mount "type=bind,src=$token_file,dst=/run/secrets/runner-token,readonly" \
   --env RUNNER_HOST=0.0.0.0 \
   --env RUNNER_TOKEN_FILE=/run/secrets/runner-token \
@@ -38,6 +43,17 @@ test "$(curl --retry 10 --retry-delay 1 --retry-all-errors --silent --output /de
 
 test "$(docker exec "$container" id -u)" = "10001"
 docker exec "$container" codex --version | grep -F "codex-cli $expected_codex_version" >/dev/null
+docker exec "$container" gemini --version | grep -F "$expected_gemini_version" >/dev/null
+runtimes=$(curl --fail --silent --header "Authorization: Bearer $runner_token" \
+  "http://127.0.0.1:${port}/runtimes")
+printf '%s' "$runtimes" | node -e '
+  let body = "";
+  process.stdin.on("data", (chunk) => { body += chunk; });
+  process.stdin.on("end", () => {
+    const runtime = JSON.parse(body).data?.find(({ id }) => id === "gemini");
+    process.exit(runtime?.status === "authentication_required" ? 0 : 1);
+  });
+'
 docker exec "$container" sh -c 'test -s /etc/ssl/certs/ca-certificates.crt'
 if docker exec "$container" sh -c 'command -v npm >/dev/null 2>&1 || command -v yarn >/dev/null 2>&1 || command -v corepack >/dev/null 2>&1'; then
   echo "The production image must not include package-manager CLIs." >&2

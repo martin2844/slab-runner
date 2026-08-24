@@ -114,6 +114,7 @@ export function defineRuntimeAdapterConformance(
 
     it("settles a provider health probe when its abort signal fires", async () => {
       const { adapter, driver } = options.createHarness();
+      await adapter.start();
       driver.hangNextHealthProbe();
       const controller = new AbortController();
       let timeout: NodeJS.Timeout | undefined;
@@ -133,6 +134,7 @@ export function defineRuntimeAdapterConformance(
       });
 
       expect(settled).toBe(true);
+      await adapter.shutdown();
     });
 
     it("supports fresh and resumed runtime threads through the same interface", async () => {

@@ -2,9 +2,10 @@
 
 Slab Runner is a small local daemon that executes agent turns through registered runtime adapters. The Slab control plane sends an agent definition, a message, a runtime thread identifier, and an allowlist of MCP servers. Runner returns one stable event protocol regardless of the runtime behind it.
 
-Runner ships a stable Codex adapter through `codex app-server` and an
-experimental Claude adapter through the official Claude Agent SDK. It does not
-parse human-readable CLI output from either provider.
+Runner ships a stable Codex adapter through `codex app-server`, plus
+experimental Claude Agent SDK, Direct API, and Gemini CLI adapters. Gemini is
+consumed only through its documented `stream-json` interface; Runner never
+parses its human terminal UI.
 
 ```text
 Next.js control plane
@@ -13,10 +14,10 @@ Next.js control plane
         v
    Slab Runner
         |
-        +--------------------+
-        |                    |
-        v                    v
- Codex app-server      Claude Agent SDK
+        +-----------+-----------+-----------+
+        |           |           |           |
+        v           v           v           v
+ Codex app-server  Claude SDK  Direct API  Gemini CLI
         |
         +-- Slab Work MCP
         +-- Slab Docs MCP
@@ -29,6 +30,7 @@ Runner owns runtime execution only. It does not persist chats, agent definitions
 - Node.js 22 or later
 - Codex CLI installed and authenticated for Codex runs
 - an Anthropic API key configured in Slab Agents for Claude runs
+- Gemini CLI account authorization in Runner-owned storage for Gemini runs
 
 ## Run locally
 
@@ -62,6 +64,8 @@ container network. It does not accept arbitrary interface addresses.
 | `RUNNER_PORT` | `6990` | Listening port |
 | `CODEX_BIN` | `codex` | Codex executable path or name |
 | `RUNNER_CODEX_HOME` | `~/.local/state/slab-runner/codex` | Dedicated persistent Codex state used only by Slab Runner |
+| `GEMINI_BIN` | `gemini` | Gemini CLI executable path or name |
+| `RUNNER_GEMINI_HOME` | `~/.local/state/slab-runner/gemini` | Dedicated persistent Gemini account state used only by Slab Runner |
 | `RUNNER_TOKEN` | unset | Optional local bearer token, minimum 16 characters |
 | `RUNNER_TOKEN_FILE` | unset | File containing the bearer token; mutually exclusive with `RUNNER_TOKEN` |
 
@@ -73,7 +77,9 @@ For a container deployment, use:
 RUNNER_HOST=0.0.0.0
 RUNNER_TOKEN_FILE=/run/secrets/runner_token
 RUNNER_CODEX_HOME=/var/lib/slab-runner/codex
+RUNNER_GEMINI_HOME=/var/lib/slab-runner/gemini
 CODEX_BIN=/usr/local/bin/codex
+GEMINI_BIN=/usr/local/bin/gemini
 ```
 
 Do not publish port `6990` on the host. Slab Agents reaches Runner through the
@@ -145,6 +151,11 @@ enough. Claude reports `authentication_required` at this low-level endpoint
 because its encrypted credential is owned by the control plane and supplied
 only for the selected run. Settings combines this definition with the latest
 server-side Anthropic verification.
+
+Gemini availability requires both the CLI binary and a non-empty official
+OAuth credential in the isolated Gemini home. In the packaged stack, use
+`sudo slabctl gemini login`; the control plane receives only sanitized account
+health and never reads the credential.
 
 ### Create a run
 
@@ -218,6 +229,12 @@ For a new thread, omit `runtimeThreadId` or set it to `null`. Runner emits `thre
 request with `maxTokens`; the control plane must fail closed instead of calling
 that a hard token limit. Codex token ceilings are enforced by the control plane
 at normalized incremental usage boundaries.
+
+Gemini emits aggregate usage after a Run and exposes no native hard token or
+cost ceiling through this CLI path. Runner therefore rejects Gemini Runs that
+carry either hard limit before starting the process. Headless Gemini cannot
+pause for a Slab approval round-trip: prompt-gated MCP tools are omitted from
+that Run, while explicitly approved tools remain visible.
 
 The runtime catalog advertises budget enforcement capabilities explicitly. Consumers
 must treat a missing budget capability as unsupported so rolling upgrades fail

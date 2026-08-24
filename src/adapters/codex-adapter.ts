@@ -25,6 +25,11 @@ import type {
   AgentExecutionRequest,
   McpServerDefinition,
 } from "../runtime/protocol.js";
+import {
+  effectiveMcpToolPolicy,
+  MCP_SERVER_ALIASES,
+  readOnlyToolsForServer,
+} from "../runtime/mcp-policy.js";
 
 interface NativeApproval {
   id: string;
@@ -71,43 +76,6 @@ const TOOL_ITEM_TYPES = new Set([
   "imageGeneration",
   "sleep",
 ]);
-
-const READ_ONLY_MCP_TOOLS: Record<string, readonly string[]> = {
-  work: [
-    "list_projects",
-    "get_project",
-    "list_issues",
-    "get_issue",
-    "search_issues",
-    "list_comments",
-    "list_links",
-    "get_blocked_issues",
-    "get_issue_history",
-  ],
-  docs: [
-    "list_docs",
-    "search_docs",
-    "get_doc",
-    "list_doc_revisions",
-    "get_doc_revision",
-  ],
-  posthog: ["list_projects", "query_analytics"],
-  email: [
-    "email_list_accounts",
-    "email_search",
-    "email_get_message",
-    "email_list_threads",
-  ],
-};
-
-const MCP_SERVER_ALIASES: Record<string, keyof typeof READ_ONLY_MCP_TOOLS> = {
-  work: "work",
-  slab: "work",
-  docs: "docs",
-  "slab-docs": "docs",
-  posthog: "posthog",
-  email: "email",
-};
 
 export const CODEX_RUNTIME_DEFINITION = {
   id: "codex",
@@ -488,36 +456,29 @@ export class CodexAdapter implements RuntimeAdapter {
   ): Record<string, unknown> {
     return {
       mcp_servers: Object.fromEntries(
-        servers.map(({ name, url, headers, approval }) => [
-          name,
-          {
-            url,
-            http_headers: headers,
-            enabled: true,
-            required: true,
-            default_tools_approval_mode:
-              approval?.defaultMode ?? (fullAccess ? "approve" : "prompt"),
-            ...(approval?.tools && Object.keys(approval.tools).length > 0
-              ? {
-                  tools: Object.fromEntries(
-                    Object.entries(approval.tools).map(([tool, mode]) => [
-                      tool,
-                      { approval_mode: mode },
-                    ]),
-                  ),
-                }
-              : !fullAccess && READ_ONLY_MCP_TOOLS[name]
+        servers.map((server) => {
+          const policy = effectiveMcpToolPolicy(server, fullAccess);
+          return [
+            server.name,
+            {
+              url: server.url,
+              http_headers: server.headers,
+              enabled: true,
+              required: true,
+              default_tools_approval_mode: policy.defaultMode,
+              ...(Object.keys(policy.tools).length > 0
                 ? {
                     tools: Object.fromEntries(
-                      READ_ONLY_MCP_TOOLS[name].map((tool) => [
+                      Object.entries(policy.tools).map(([tool, mode]) => [
                         tool,
-                        { approval_mode: "approve" },
+                        { approval_mode: mode },
                       ]),
                     ),
                   }
                 : {}),
-          },
-        ]),
+            },
+          ];
+        }),
       ),
     };
   }
@@ -1002,7 +963,7 @@ export class CodexAdapter implements RuntimeAdapter {
     if (typeof server !== "string" || typeof prompt !== "string") return null;
     const serverKind = MCP_SERVER_ALIASES[server];
     if (!serverKind) return null;
-    const readOnlyTools = READ_ONLY_MCP_TOOLS[serverKind];
+    const readOnlyTools = readOnlyToolsForServer(serverKind);
     if (!readOnlyTools) return null;
     const match = /^Allow the [^\n]+ MCP server to run tool "([^"]+)"\?$/.exec(
       prompt,

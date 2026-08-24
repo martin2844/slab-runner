@@ -11,7 +11,9 @@ const envSchema = z
     RUNNER_HOST: z.enum(runnerHosts).default("127.0.0.1"),
     RUNNER_PORT: z.coerce.number().int().min(1).max(65_535).default(6990),
     CODEX_BIN: z.string().trim().min(1).default("codex"),
+    GEMINI_BIN: z.string().trim().min(1).default("gemini"),
     RUNNER_CODEX_HOME: z.string().trim().min(1).optional(),
+    RUNNER_GEMINI_HOME: z.string().trim().min(1).optional(),
     RUNNER_TOKEN: z.string().min(16).optional(),
     RUNNER_TOKEN_FILE: z.string().trim().min(1).optional(),
   })
@@ -31,6 +33,8 @@ export interface RunnerConfig {
   codexBin: string;
   codexHome: string;
   codexAuthSourceFile: string;
+  geminiBin: string;
+  geminiHome: string;
   runnerToken?: string;
   safeCwd: string;
   runJournalFile: string;
@@ -63,6 +67,10 @@ export function loadConfig(
   const codexHome = parsed.RUNNER_CODEX_HOME
     ? resolve(parsed.RUNNER_CODEX_HOME)
     : join(homedir(), ".local", "state", "slab-runner", "codex");
+  const geminiHome = parsed.RUNNER_GEMINI_HOME
+    ? resolve(parsed.RUNNER_GEMINI_HOME)
+    : join(homedir(), ".local", "state", "slab-runner", "gemini");
+  mkdirSync(geminiHome, { recursive: true, mode: 0o700 });
   mkdirSync(safeCwd, { recursive: true, mode: 0o700 });
   return {
     host: parsed.RUNNER_HOST,
@@ -70,6 +78,8 @@ export function loadConfig(
     codexBin: parsed.CODEX_BIN,
     codexHome,
     codexAuthSourceFile: join(primaryCodexHome, "auth.json"),
+    geminiBin: parsed.GEMINI_BIN,
+    geminiHome,
     ...(runnerToken ? { runnerToken } : {}),
     safeCwd,
     runJournalFile: join(codexHome, "run-journal.jsonl"),

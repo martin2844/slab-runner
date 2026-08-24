@@ -167,3 +167,27 @@ usage fails closed when a hard limit is active. Direct API does not claim a
 native token or cost ceiling, and an upstream call can cross a limit before its
 terminal usage becomes observable. `mcpToolAllowlist` remains false because
 the model sees every tool exposed by each assigned MCP server.
+
+## Gemini CLI experimental adapter
+
+Gemini uses the official CLI's newline-delimited `stream-json` protocol. The
+adapter accepts only bounded JSON events and rejects human-readable or
+oversized output. It maps assistant messages, MCP tool use/results, runtime
+errors, aggregate usage, cancellation, and terminal completion to the shared
+contract. Any tool still open when the process ends receives exactly one
+`tool.failed` event with `terminal_event_missing`.
+
+Each Run receives a protected temporary system-settings file and admin policy.
+Only its run-scoped MCP servers are configured, Gemini built-ins are disabled,
+and tools permitted by the server's Slab approval policy are filtered before
+discovery. MCP credentials exist only in that mode-0600 temporary file, are
+redacted from events, and are deleted at Run termination.
+
+Google OAuth state is runtime-owned under `RUNNER_GEMINI_HOME`. Health checks
+report only authenticated/required state and never credential contents.
+Headless Gemini does not provide a reliable Slab approval callback, so the
+adapter declares `toolApprovals: false`: prompt-gated tools are unavailable
+rather than silently approved. Usage is a Run aggregate and the CLI exposes no
+native hard cost/token cap; hard-budget requests fail before process creation.
+Gemini remains experimental until a real account-authenticated deployment
+exercise proves provider execution and MCP behavior.

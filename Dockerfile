@@ -13,6 +13,7 @@ RUN npm run build && npm prune --omit=dev
 FROM node:22-bookworm-slim AS runtime
 
 ARG CODEX_VERSION=0.148.0
+ARG GEMINI_CLI_VERSION=0.56.0
 
 LABEL org.opencontainers.image.title="Slab Runner" \
       org.opencontainers.image.description="Runtime daemon for Slab agents" \
@@ -22,7 +23,7 @@ LABEL org.opencontainers.image.title="Slab Runner" \
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
-  && npm install --global "@openai/codex@${CODEX_VERSION}" \
+  && npm install --global "@openai/codex@${CODEX_VERSION}" "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
   && npm cache clean --force \
   && rm -rf \
     /usr/local/lib/node_modules/npm \
@@ -41,18 +42,20 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 
-RUN mkdir -p /var/lib/slab-runner/codex /tmp/slab-runner-workspace \
+RUN mkdir -p /var/lib/slab-runner/codex /var/lib/slab-runner/gemini /tmp/slab-runner-workspace \
   && chown -R slab-runner:slab-runner /var/lib/slab-runner /tmp/slab-runner-workspace
 
 ENV NODE_ENV=production \
     RUNNER_HOST=127.0.0.1 \
     RUNNER_PORT=6990 \
     RUNNER_CODEX_HOME=/var/lib/slab-runner/codex \
-    CODEX_BIN=/usr/local/bin/codex
+    CODEX_BIN=/usr/local/bin/codex \
+    RUNNER_GEMINI_HOME=/var/lib/slab-runner/gemini \
+    GEMINI_BIN=/usr/local/bin/gemini
 
 USER slab-runner
 
-VOLUME ["/var/lib/slab-runner/codex"]
+VOLUME ["/var/lib/slab-runner/codex", "/var/lib/slab-runner/gemini"]
 EXPOSE 6990
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \

@@ -18,6 +18,7 @@ permissions:
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
   CODEX_VERSION: "0.148.0"
+  GEMINI_CLI_VERSION: "0.56.0"
 
 jobs:
   verify:
@@ -36,10 +37,11 @@ jobs:
       - run: npm test
       - run: npm run build
       - name: Build native smoke image
-        run: docker build --build-arg CODEX_VERSION="$CODEX_VERSION" --tag slab-runner:smoke .
+        run: docker build --build-arg CODEX_VERSION="$CODEX_VERSION" --build-arg GEMINI_CLI_VERSION="$GEMINI_CLI_VERSION" --tag slab-runner:smoke .
       - name: Verify release image
         env:
           SLAB_RUNNER_SMOKE_IMAGE: slab-runner:smoke
+          GEMINI_CLI_VERSION: ${{ env.GEMINI_CLI_VERSION }}
         run: ./scripts/container-smoke.sh
       - name: Scan release image before publishing
         uses: aquasecurity/trivy-action@v0.36.0
@@ -96,7 +98,9 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: CODEX_VERSION=${{ env.CODEX_VERSION }}
+          build-args: |
+            CODEX_VERSION=${{ env.CODEX_VERSION }}
+            GEMINI_CLI_VERSION=${{ env.GEMINI_CLI_VERSION }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: mode=max
