@@ -14,6 +14,9 @@ export const runtimeCapabilityKeys = [
   "modelDiscovery",
   "modelValidation",
   "contextProfiling",
+  "budgetIncrementalUsage",
+  "budgetNativeTokenLimit",
+  "budgetNativeCostLimit",
 ] as const;
 
 export type RuntimeCapability = (typeof runtimeCapabilityKeys)[number];

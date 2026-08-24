@@ -124,7 +124,10 @@ GET /runtimes
         "modelSelection": true,
         "modelDiscovery": false,
         "modelValidation": false,
-        "contextProfiling": true
+        "contextProfiling": true,
+        "budgetIncrementalUsage": true,
+        "budgetNativeTokenLimit": false,
+        "budgetNativeCostLimit": false
       },
       "available": true,
       "status": "available",
@@ -209,6 +212,16 @@ agent process environment, prompt, MCP configuration, normalized events, or
 journal.
 
 For a new thread, omit `runtimeThreadId` or set it to `null`. Runner emits `thread.created`; the control plane must store its `runtimeThreadId` and send it with the next run. Runner never becomes the source of truth for that mapping.
+
+`budget` is optional. Claude maps `maxCostUsd` to the SDK's enforced
+`maxBudgetUsd`. Claude task budgets are advisory, so Runner rejects a Claude
+request with `maxTokens`; the control plane must fail closed instead of calling
+that a hard token limit. Codex token ceilings are enforced by the control plane
+at normalized incremental usage boundaries.
+
+The runtime catalog advertises budget enforcement capabilities explicitly. Consumers
+must treat a missing budget capability as unsupported so rolling upgrades fail
+closed instead of silently dropping a hard limit.
 
 `cwd` is optional. Without it, Codex runs in an empty directory under the system temporary directory rather than in the Runner repository. A future coding agent can provide an existing absolute project path explicitly.
 

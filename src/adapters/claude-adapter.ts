@@ -111,6 +111,9 @@ export const CLAUDE_RUNTIME_DEFINITION = {
     modelDiscovery: false,
     modelValidation: false,
     contextProfiling: true,
+    budgetIncrementalUsage: false,
+    budgetNativeTokenLimit: false,
+    budgetNativeCostLimit: true,
   },
 } satisfies RuntimeDefinition;
 
@@ -180,6 +183,13 @@ export class ClaudeAdapter implements RuntimeAdapter {
       throw new RunnerError(
         "RUN_ALREADY_EXISTS",
         "A run with this identifier already exists",
+        409,
+      );
+    }
+    if (context.request.budget?.maxTokens != null) {
+      throw new RunnerError(
+        "RUNTIME_BUDGET_UNSUPPORTED",
+        "Claude does not provide an enforceable per-run token limit",
         409,
       );
     }
@@ -352,9 +362,6 @@ export class ClaudeAdapter implements RuntimeAdapter {
         : {}),
       ...(run.request.budget?.maxCostUsd
         ? { maxBudgetUsd: run.request.budget.maxCostUsd }
-        : {}),
-      ...(run.request.budget?.maxTokens
-        ? { taskBudget: { total: run.request.budget.maxTokens } }
         : {}),
       ...(fresh ? { sessionId: runtimeThreadId } : { resume: runtimeThreadId }),
       mcpServers: Object.fromEntries(
@@ -730,7 +737,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
       contextWindow: usage.contextWindow,
       costUsd: usage.costUSD,
     }));
-    const inputTokens = models.reduce(
+    const uncachedInputTokens = models.reduce(
       (total, item) => total + item.inputTokens,
       0,
     );
@@ -738,6 +745,12 @@ export class ClaudeAdapter implements RuntimeAdapter {
       (total, item) => total + item.cachedInputTokens,
       0,
     );
+    const cacheCreationInputTokens = models.reduce(
+      (total, item) => total + item.cacheCreationInputTokens,
+      0,
+    );
+    const inputTokens =
+      uncachedInputTokens + cachedInputTokens + cacheCreationInputTokens;
     const outputTokens = models.reduce(
       (total, item) => total + item.outputTokens,
       0,
@@ -749,7 +762,8 @@ export class ClaudeAdapter implements RuntimeAdapter {
       providerTurnCount: message.num_turns,
       inputTokens,
       cachedInputTokens,
-      uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens),
+      cacheCreationInputTokens,
+      uncachedInputTokens: uncachedInputTokens + cacheCreationInputTokens,
       outputTokens,
       reasoningOutputTokens: 0,
       totalTokens: inputTokens + outputTokens,

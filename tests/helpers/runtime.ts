@@ -22,6 +22,9 @@ export const TEST_RUNTIME_DEFINITION = {
     modelDiscovery: false,
     modelValidation: false,
     contextProfiling: true,
+    budgetIncrementalUsage: false,
+    budgetNativeTokenLimit: false,
+    budgetNativeCostLimit: false,
   },
 } satisfies RuntimeDefinition;
 

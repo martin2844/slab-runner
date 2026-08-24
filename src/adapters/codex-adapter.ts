@@ -128,6 +128,9 @@ export const CODEX_RUNTIME_DEFINITION = {
     modelDiscovery: false,
     modelValidation: false,
     contextProfiling: true,
+    budgetIncrementalUsage: true,
+    budgetNativeTokenLimit: false,
+    budgetNativeCostLimit: false,
   },
 } satisfies RuntimeDefinition;
 

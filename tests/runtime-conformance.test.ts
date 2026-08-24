@@ -32,6 +32,9 @@ const STATELESS_RUNTIME_DEFINITION = {
     modelDiscovery: false,
     modelValidation: false,
     contextProfiling: false,
+    budgetIncrementalUsage: false,
+    budgetNativeTokenLimit: false,
+    budgetNativeCostLimit: false,
   },
 } satisfies RuntimeDefinition;
 

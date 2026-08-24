@@ -220,7 +220,7 @@ class FakeQueryDriver {
               inputTokens: 100,
               outputTokens: 20,
               cacheReadInputTokens: 40,
-              cacheCreationInputTokens: 0,
+              cacheCreationInputTokens: 10,
               webSearchRequests: 0,
               costUSD: 0.001,
               contextWindow: 200_000,
@@ -401,7 +401,44 @@ it("keeps the Anthropic key outside the Claude child environment", async () => {
   await expect(completion).resolves.toBeUndefined();
 });
 
-it("passes admitted hard limits to Claude and returns a structured budget failure", async () => {
+it("passes the native cost limit to Claude and returns a structured budget failure", async () => {
+  const provider = new FakeQueryDriver();
+  const adapter = new ClaudeAdapter(
+    "/tmp/safe-runner-cwd",
+    new FakeCredentialBoundary(),
+    provider.factory,
+  );
+  const request = executionRequest({
+    runtime: {
+      type: "claude",
+      model: "claude-test",
+      authentication: {
+        mode: "api_key",
+        credential: "anthropic-test-credential",
+      },
+    },
+    budget: {
+      maxTokens: null,
+      maxCostUsd: 2,
+      pricing: null,
+    },
+  });
+  const runtimeThreadId = await adapter.startThread(request);
+  const completion = adapter.runTurn({
+    request,
+    runtimeThreadId,
+    emit: () => {},
+  });
+  await provider.waitForTurnStart();
+  expect(provider.options?.maxBudgetUsd).toBe(2);
+  expect(provider.options?.taskBudget).toBeUndefined();
+  provider.completeWithBudgetError();
+  await expect(completion).rejects.toMatchObject({
+    code: "RUNTIME_BUDGET_EXCEEDED",
+  });
+});
+
+it("rejects a hard Claude token ceiling instead of treating taskBudget as enforcement", async () => {
   const provider = new FakeQueryDriver();
   const adapter = new ClaudeAdapter(
     "/tmp/safe-runner-cwd",
@@ -419,23 +456,15 @@ it("passes admitted hard limits to Claude and returns a structured budget failur
     },
     budget: {
       maxTokens: 12_000,
-      maxCostUsd: 2,
+      maxCostUsd: null,
       pricing: null,
     },
   });
   const runtimeThreadId = await adapter.startThread(request);
-  const completion = adapter.runTurn({
-    request,
-    runtimeThreadId,
-    emit: () => {},
-  });
-  await provider.waitForTurnStart();
-  expect(provider.options?.maxBudgetUsd).toBe(2);
-  expect(provider.options?.taskBudget).toEqual({ total: 12_000 });
-  provider.completeWithBudgetError();
-  await expect(completion).rejects.toMatchObject({
-    code: "RUNTIME_BUDGET_EXCEEDED",
-  });
+  await expect(
+    adapter.runTurn({ request, runtimeThreadId, emit: () => {} }),
+  ).rejects.toMatchObject({ code: "RUNTIME_BUDGET_UNSUPPORTED" });
+  expect(provider.options).toBeNull();
 });
 
 it("resumes only the runtime thread explicitly supplied by the control plane", async () => {
@@ -635,7 +664,12 @@ it("marks Claude usage as a run aggregate with provider turn count", async () =>
     expect.objectContaining({
       usageScope: "run_aggregate",
       providerTurnCount: 1,
-      inputTokens: 100,
+      inputTokens: 150,
+      cachedInputTokens: 40,
+      cacheCreationInputTokens: 10,
+      uncachedInputTokens: 110,
+      outputTokens: 20,
+      totalTokens: 170,
     }),
   ]);
 });
