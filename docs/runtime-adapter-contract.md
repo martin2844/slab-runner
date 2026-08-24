@@ -112,3 +112,30 @@ Codex is the first conforming adapter. It currently declares two limitations:
 
 All other declared Codex capabilities are exercised by the shared conformance
 suite. These limitations are visible metadata, not hidden assumptions.
+
+## Claude experimental adapter
+
+Claude uses the official Claude Agent SDK and the same normalized lifecycle as
+Codex. The control plane owns the encrypted Anthropic API key, verifies it with
+the bounded Models API, and supplies it only on the private per-run request.
+Runner does not put that key in the spawned agent process. Instead it creates a
+short-lived surrogate and a loopback-only credential proxy whose upstream is
+fixed to `api.anthropic.com`.
+
+The adapter translates SDK assistant, tool, usage, retry, approval, and
+cancellation events. It uses a host-selected `sessionId` for fresh execution
+and `resume` only when the control plane explicitly supplies a prior chat
+thread. Provider authentication failures use
+`RUNTIME_AUTHENTICATION_REQUIRED`; other provider failures remain bounded
+`RUNTIME_CRASHED` errors. Claude remains experimental until real deployment
+acceptance proves its complete MCP and approval semantics.
+
+Claude currently declares `mcpToolAllowlist: false`. Run-scoped MCP server
+assignment and per-tool approval policies are enforced, but the SDK permission
+options do not remove unlisted tools from the model-visible server catalog.
+Result usage is emitted as an explicit Run aggregate with the provider turn
+count; consumers must not derive per-call initial or peak context from it.
+
+The loopback credential proxy applies a bounded upstream timeout and destroys
+active Anthropic requests when the downstream disconnects or Runner shuts
+down.

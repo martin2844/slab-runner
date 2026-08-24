@@ -51,6 +51,10 @@ export interface AgentExecutionRequest {
   runtime: {
     type: string;
     model: string | null;
+    authentication?: {
+      mode: "api_key";
+      credential: string;
+    } | null;
   };
   thread: {
     runtimeThreadId: string | null;
@@ -147,6 +151,13 @@ const canonicalRequestSchema = z.object({
         "Runtime IDs must use lowercase letters, numbers, underscores, or hyphens",
       ),
     model: z.string().trim().min(1).max(200).nullable(),
+    authentication: z
+      .object({
+        mode: z.literal("api_key"),
+        credential: z.string().min(16).max(16_384),
+      })
+      .nullable()
+      .default(null),
   }),
   thread: z.object({
     runtimeThreadId: z.string().trim().min(1).max(500).nullable(),
@@ -217,6 +228,7 @@ function normalizeExecutionRequest(input: unknown): unknown {
     runtime: {
       type: runtimeType,
       model: rawRuntime.model ?? raw.model ?? null,
+      authentication: rawRuntime.authentication ?? null,
     },
     thread: {
       runtimeThreadId:

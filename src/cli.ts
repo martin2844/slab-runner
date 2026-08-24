@@ -2,6 +2,7 @@
 
 import { createServer, type Server } from "node:http";
 import { CodexAdapter } from "./adapters/codex-adapter.js";
+import { ClaudeAdapter } from "./adapters/claude-adapter.js";
 import { prepareIsolatedCodexHome } from "./app-server/codex-home.js";
 import { ProcessAppServerConnection } from "./app-server/process-connection.js";
 import { loadConfig } from "./config.js";
@@ -45,14 +46,21 @@ async function main(): Promise<void> {
     logger,
     config.codexHome,
   );
-  const adapter = new CodexAdapter(connection, config.safeCwd);
-  try {
-    await adapter.start();
-  } catch {
-    logger.warn("runtime unavailable at startup", { runtime: "codex" });
+  const adapters = [
+    new CodexAdapter(connection, config.safeCwd),
+    new ClaudeAdapter(config.safeCwd),
+  ];
+  for (const adapter of adapters) {
+    try {
+      await adapter.start();
+    } catch {
+      logger.warn("runtime unavailable at startup", {
+        runtime: adapter.definition.id,
+      });
+    }
   }
   const runManager = new RunManager(
-    new Map([[adapter.definition.id, adapter]]),
+    new Map(adapters.map((adapter) => [adapter.definition.id, adapter])),
     logger,
     undefined,
     config.runJournalFile,
@@ -70,7 +78,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    await adapter.shutdown();
+    await Promise.allSettled(adapters.map((adapter) => adapter.shutdown()));
   };
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());

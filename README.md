@@ -2,7 +2,9 @@
 
 Slab Runner is a small local daemon that executes agent turns through registered runtime adapters. The Slab control plane sends an agent definition, a message, a runtime thread identifier, and an allowlist of MCP servers. Runner returns one stable event protocol regardless of the runtime behind it.
 
-The MVP supports Codex through `codex app-server`. It does not parse human-readable CLI output.
+Runner ships a stable Codex adapter through `codex app-server` and an
+experimental Claude adapter through the official Claude Agent SDK. It does not
+parse human-readable CLI output from either provider.
 
 ```text
 Next.js control plane
@@ -11,9 +13,10 @@ Next.js control plane
         v
    Slab Runner
         |
-        | JSON-RPC over stdio
-        v
- Codex app-server
+        +--------------------+
+        |                    |
+        v                    v
+ Codex app-server      Claude Agent SDK
         |
         +-- Slab Work MCP
         +-- Slab Docs MCP
@@ -24,7 +27,8 @@ Runner owns runtime execution only. It does not persist chats, agent definitions
 ## Requirements
 
 - Node.js 22 or later
-- Codex CLI installed and authenticated
+- Codex CLI installed and authenticated for Codex runs
+- an Anthropic API key configured in Slab Agents for Claude runs
 
 ## Run locally
 
@@ -132,9 +136,12 @@ GET /runtimes
 }
 ```
 
-Availability becomes false while Codex is missing, unauthenticated, starting,
-or restarting. Runner checks the account exposed by `codex app-server`; process
-readiness alone is not enough to advertise an executable runtime.
+The response contains one row per registered adapter. Codex availability comes
+from the account exposed by `codex app-server`; process readiness alone is not
+enough. Claude reports `authentication_required` at this low-level endpoint
+because its encrypted credential is owned by the control plane and supplied
+only for the selected run. Settings combines this definition with the latest
+server-side Anthropic verification.
 
 ### Create a run
 
@@ -192,6 +199,14 @@ Runner accepts up to eight uniquely named HTTP(S) MCP servers selected by the
 control plane for that run. Credentials are forwarded to the selected runtime
 as MCP HTTP headers, held in memory for the active run, and redacted from
 normalized events and logs.
+
+For `runtime.type: "claude"`, the authenticated control plane also supplies an
+API-key credential in the private Runner request. Runner replaces it with a
+short-lived surrogate before starting the Claude SDK child process. A
+loopback-only proxy injects the real key only when forwarding `/v1/*` requests
+to the fixed `api.anthropic.com` origin. The real key is never placed in the
+agent process environment, prompt, MCP configuration, normalized events, or
+journal.
 
 For a new thread, omit `runtimeThreadId` or set it to `null`. Runner emits `thread.created`; the control plane must store its `runtimeThreadId` and send it with the next run. Runner never becomes the source of truth for that mapping.
 
@@ -315,6 +330,6 @@ The main module boundaries are:
 - `src/runtime`: public protocol, run state, approvals, and event replay
 - `src/http`: loopback HTTP and SSE API
 
-Future Kimi, Claude, OpenAI API, or Anthropic API support must implement
+Future Kimi, OpenAI API, or other provider support must implement
 `RuntimeAdapter` and pass the shared conformance suite without changing the HTTP
 contract or normalized event names.

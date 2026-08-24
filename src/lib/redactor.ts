@@ -46,8 +46,10 @@ export class Redactor {
 
 export function collectHeaderSecrets(
   serverHeaders: ReadonlyArray<Record<string, string>>,
+  additionalSecrets: ReadonlyArray<string | undefined> = [],
 ): Redactor {
   const redactor = new Redactor();
   for (const headers of serverHeaders) redactor.addHeaders(headers);
+  for (const secret of additionalSecrets) redactor.add(secret);
   return redactor;
 }
