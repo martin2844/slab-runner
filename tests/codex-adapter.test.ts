@@ -292,6 +292,179 @@ describe("CodexAdapter", () => {
     await completion;
   });
 
+  it("includes the pending Email payload in the approval event", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "email",
+          url: "http://127.0.0.1:6981/mcp",
+          headers: { Authorization: "Bearer scoped-email-token" },
+          approval: {
+            defaultMode: "approve",
+            tools: { email_send: "prompt" },
+          },
+        },
+      ],
+    });
+    const { connection, events, completion } = await activeTurn(request);
+    connection.serverNotification({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "email-call-1",
+          type: "mcpToolCall",
+          server: "email",
+          tool: "email_send",
+          arguments: {
+            accountId: "account-1",
+            expectedFrom: "clara@clasific.ar",
+            to: ["buyer@example.com"],
+            subject: "Follow-up",
+            text: "Hello",
+            idempotencyKey: "email-once",
+          },
+        },
+      },
+    });
+    connection.serverRequest({
+      id: 192,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName: "email",
+        message: 'Allow the email MCP server to run tool "email_send"?',
+      },
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "approval.required",
+      data: {
+        server: "email",
+        tool: "email_send",
+        toolId: "email-call-1",
+        toolArguments: {
+          accountId: "account-1",
+          expectedFrom: "clara@clasific.ar",
+          to: ["buyer@example.com"],
+          subject: "Follow-up",
+          text: "Hello",
+        },
+      },
+    });
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
+  it("fails closed when an Email approval cannot be correlated uniquely", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "email",
+          url: "http://127.0.0.1:6981/mcp",
+          headers: { Authorization: "Bearer scoped-email-token" },
+          approval: {
+            defaultMode: "approve",
+            tools: { email_send: "prompt" },
+          },
+        },
+      ],
+    });
+    const { connection, events, completion } = await activeTurn(request);
+    for (const [id, recipient] of [
+      ["email-call-a", "a@example.com"],
+      ["email-call-b", "b@example.com"],
+    ]) {
+      connection.serverNotification({
+        method: "item/started",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id,
+            type: "mcpToolCall",
+            server: "email",
+            tool: "email_send",
+            arguments: {
+              expectedFrom: "clara@clasific.ar",
+              to: [recipient],
+              subject: "Follow-up",
+              text: "Hello",
+            },
+          },
+        },
+      });
+    }
+    connection.serverRequest({
+      id: 193,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName: "email",
+        message: 'Allow the email MCP server to run tool "email_send"?',
+      },
+    });
+
+    const required = events.at(-1);
+    expect(required).toMatchObject({
+      type: "approval.required",
+      data: { server: "email" },
+    });
+    expect(required?.data).not.toHaveProperty("toolArguments");
+    expect(required?.data).not.toHaveProperty("toolId");
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
+  it("does not persist full approval arguments for non-Email MCP tools", async () => {
+    const { connection, events, completion } = await activeTurn();
+    connection.serverNotification({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "work-call-1",
+          type: "mcpToolCall",
+          server: "work",
+          tool: "create_issue",
+          arguments: { description: "private work payload" },
+        },
+      },
+    });
+    connection.serverRequest({
+      id: 194,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName: "work",
+        message: 'Allow the work MCP server to run tool "create_issue"?',
+      },
+    });
+
+    const required = events.at(-1);
+    expect(required?.data).not.toHaveProperty("toolArguments");
+    expect(JSON.stringify(required)).not.toContain("private work payload");
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
   it("normalizes assistant, tool, usage, and completion events", async () => {
     const { connection, events, completion } = await activeTurn();
 

@@ -555,6 +555,79 @@ it("maps producer-shaped API auth errors without assistant output", async () => 
   expect(events).not.toContain("assistant.completed");
 });
 
+it("includes explicit Email send context in Claude approvals", async () => {
+  const provider = new FakeQueryDriver();
+  const adapter = new ClaudeAdapter(
+    "/tmp/safe-runner-cwd",
+    new FakeCredentialBoundary(),
+    provider.factory,
+  );
+  const request = executionRequest({
+    runtime: {
+      type: "claude",
+      model: "claude-test",
+      authentication: {
+        mode: "api_key",
+        credential: "anthropic-test-credential",
+      },
+    },
+    mcpServers: [
+      {
+        name: "email",
+        url: "http://email.invalid/mcp",
+        headers: {},
+        approval: { defaultMode: "prompt", tools: {} },
+      },
+    ],
+  });
+  const runtimeThreadId = await adapter.startThread(request);
+  const events: Array<{
+    type: string;
+    data: Record<string, unknown> | undefined;
+  }> = [];
+  const completion = adapter.runTurn({
+    request,
+    runtimeThreadId,
+    emit: (type, data) => events.push({ type, data }),
+  });
+  await provider.waitForTurnStart();
+  const decision = provider.options!.canUseTool!(
+    "mcp__email__email_send",
+    {
+      expectedFrom: "clara@clasific.ar",
+      to: ["buyer@example.com"],
+      subject: "Follow-up",
+      text: "Hello",
+    },
+    {
+      signal: new AbortController().signal,
+      toolUseID: "email-tool",
+      requestId: "email-approval-request",
+    },
+  );
+  const approval = events.find(({ type }) => type === "approval.required");
+  expect(approval).toMatchObject({
+    data: {
+      server: "email",
+      tool: "email_send",
+      toolArguments: {
+        expectedFrom: "clara@clasific.ar",
+        to: ["buyer@example.com"],
+        subject: "Follow-up",
+        text: "Hello",
+      },
+    },
+  });
+  await adapter.respondToApproval(
+    request.runId,
+    String(approval?.data?.approvalId),
+    "deny",
+  );
+  await expect(decision).resolves.toMatchObject({ behavior: "deny" });
+  provider.completeTurn("completed");
+  await completion;
+});
+
 it("settles SDK-aborted approvals exactly once", async () => {
   const provider = new FakeQueryDriver();
   const adapter = new ClaudeAdapter(

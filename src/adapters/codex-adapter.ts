@@ -53,6 +53,9 @@ interface ActiveRun {
       startedAt: string;
       timestampMs: number;
       data: Record<string, unknown>;
+      server?: string;
+      tool?: string;
+      approvalArguments?: unknown;
     }
   >;
   terminalToolIds: Set<string>;
@@ -731,7 +734,16 @@ export class CodexAdapter implements RuntimeAdapter {
       });
     }
     const safeData = this.safeRecord(run, data);
-    if (lifecycle === "started" && trackedStart) trackedStart.data = safeData;
+    if (lifecycle === "started" && trackedStart) {
+      trackedStart.data = safeData;
+      trackedStart.server = server;
+      trackedStart.tool = tool;
+      trackedStart.approvalArguments =
+        server === "email" &&
+        (tool === "email_send" || tool === "email_reply")
+          ? run.redactor.value(argumentsValue)
+          : undefined;
+    }
     run.emit(
       lifecycle === "started"
         ? "tool.started"
@@ -900,6 +912,7 @@ export class CodexAdapter implements RuntimeAdapter {
     }
 
     const approvalId = randomUUID();
+    const pendingTool = this.pendingToolApproval(run, params);
     const approval: NativeApproval = {
       id: approvalId,
       nativeId: message.id,
@@ -925,8 +938,52 @@ export class CodexAdapter implements RuntimeAdapter {
         ...(typeof params.message === "string"
           ? { message: params.message }
           : {}),
+        ...(pendingTool
+          ? {
+              tool: pendingTool.tool,
+              toolId: pendingTool.toolId,
+              toolArguments: pendingTool.arguments,
+            }
+          : {}),
       }),
     );
+  }
+
+  private pendingToolApproval(
+    run: ActiveRun,
+    params: Record<string, unknown>,
+  ): { toolId: string; tool: string; arguments: unknown } | null {
+    const server =
+      typeof params.serverName === "string" ? params.serverName : null;
+    const prompt = typeof params.message === "string" ? params.message : null;
+    const promptTool = prompt
+      ? /^Allow the [^\n]+ MCP server to run tool "([^"]+)"\?$/.exec(
+          prompt,
+        )?.[1]
+      : null;
+    const requestedToolId =
+      typeof params.itemId === "string" ? params.itemId : null;
+    const candidates = [...run.toolStarts.entries()].filter(
+      ([toolId, started]) => {
+        if (requestedToolId && toolId !== requestedToolId) return false;
+        if (server && started.server !== server) return false;
+        if (promptTool && started.tool !== promptTool) return false;
+        return (
+          started.server === "email" &&
+          (started.tool === "email_send" || started.tool === "email_reply") &&
+          started.approvalArguments !== undefined
+        );
+      },
+    );
+    if (candidates.length !== 1) return null;
+    const match = candidates[0];
+    if (!match) return null;
+    const [toolId, started] = match;
+    return {
+      toolId,
+      tool: started.tool ?? promptTool ?? "unknown",
+      arguments: started.approvalArguments,
+    };
   }
 
   private handleServerRequestResolved(params: Record<string, unknown>): void {

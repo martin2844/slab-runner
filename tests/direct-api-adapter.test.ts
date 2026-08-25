@@ -210,6 +210,7 @@ class FakeMcp extends McpToolClient {
   constructor(
     private readonly server: McpServerDefinition,
     private readonly fail = false,
+    private readonly tool = "get_issue",
   ) {
     super();
   }
@@ -219,14 +220,13 @@ class FakeMcp extends McpToolClient {
   override definitions(): DiscoveredMcpTool[] {
     return [
       {
-        providerName: "mcp__work__get_issue",
+        providerName: `mcp__${this.server.name}__${this.tool}`,
         server: this.server,
-        tool: "get_issue",
-        description: "Get a Work issue",
+        tool: this.tool,
+        description: `Call ${this.tool}`,
         inputSchema: {
           type: "object",
-          properties: { key: { type: "string" } },
-          required: ["key"],
+          properties: {},
         },
       },
     ];
@@ -281,6 +281,77 @@ describe("Direct API adapter", () => {
         budgetNativeCostLimit: false,
       },
     });
+  });
+
+  it("includes explicit Email send context in Direct API approvals", async () => {
+    const args = {
+      accountId: "account-1",
+      expectedFrom: "clara@clasific.ar",
+      to: ["buyer@example.com"],
+      subject: "Follow-up",
+      text: "Hello",
+      idempotencyKey: "approval-once",
+    };
+    const first = responseObject(
+      [
+        {
+          id: "email_item",
+          type: "function_call",
+          call_id: "email_call",
+          name: "mcp__email__email_send",
+          arguments: JSON.stringify(args),
+          status: "completed",
+        },
+      ],
+      "",
+    );
+    const second = responseObject([], "sent");
+    const remote = await provider((_request, call) => ({
+      body: sse(call === 1 ? first : second),
+    }));
+    const email: McpServerDefinition = {
+      name: "email",
+      url: "http://email.invalid/mcp",
+      headers: {},
+      approval: { defaultMode: "prompt", tools: {} },
+    };
+    const request = directRequest(remote.baseUrl, { mcpServers: [email] });
+    const adapter = new DirectApiAdapter(
+      undefined,
+      () => new FakeMcp(email, false, "email_send"),
+    );
+    const events: Array<{
+      type: string;
+      data: Record<string, unknown> | undefined;
+    }> = [];
+    const turn = adapter.runTurn({
+      request,
+      runtimeThreadId: await adapter.startThread(request),
+      emit: (type, data) => events.push({ type, data }),
+    });
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (events.some(({ type }) => type === "approval.required")) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const approval = events.find(({ type }) => type === "approval.required");
+    expect(approval).toMatchObject({
+      data: {
+        server: "email",
+        tool: "email_send",
+        toolArguments: {
+          expectedFrom: "clara@clasific.ar",
+          to: ["buyer@example.com"],
+          subject: "Follow-up",
+          text: "Hello",
+        },
+      },
+    });
+    await adapter.respondToApproval(
+      request.runId,
+      String(approval?.data?.approvalId),
+      "approve",
+    );
+    await turn;
   });
 
   it("streams a Responses API answer and normalized per-call usage", async () => {

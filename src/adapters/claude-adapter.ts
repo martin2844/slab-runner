@@ -9,6 +9,7 @@ import {
 import { AnthropicCredentialProxy } from "./anthropic-credential-proxy.js";
 import type { AnthropicCredentialLease } from "./anthropic-credential-proxy.js";
 import { collectHeaderSecrets, type Redactor } from "../lib/redactor.js";
+import { emailApprovalContext } from "../lib/approval-context.js";
 import {
   approxTokens,
   measurePayload,
@@ -468,6 +469,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
     options: { signal: AbortSignal; toolUseID: string; title?: string },
   ): Promise<PermissionResult> {
     const approvalId = randomUUID();
+    const target = this.mcpTarget(run.request.mcpServers, toolName);
     return new Promise<PermissionResult>((resolve) => {
       let settled = false;
       const settle = (
@@ -528,6 +530,14 @@ export class ClaudeAdapter implements RuntimeAdapter {
         argumentsApproxTokens: measurement.approxTokens,
         ...(measurement.preview
           ? { argumentsPreview: measurement.preview }
+          : {}),
+        ...(target
+          ? emailApprovalContext(
+              target.server.name,
+              target.tool,
+              input,
+              run.redactor,
+            )
           : {}),
       });
     });
