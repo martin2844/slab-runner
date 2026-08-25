@@ -953,6 +953,51 @@ describe("CodexAdapter", () => {
     await completion;
   });
 
+  it("auto-approves dynamic MCP tools when the server policy allows them", async () => {
+    const request = executionRequest();
+    request.mcpServers.push({
+      name: "custom_http_agent_metrics_api",
+      url: "https://agents.example.test/api/integrations/metrics/mcp",
+      headers: {},
+      approval: { defaultMode: "approve", tools: {} },
+    });
+    const { connection, events, completion } = await activeTurn(request);
+    connection.serverRequest({
+      id: 146,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName: "custom_http_agent_metrics_api",
+        message:
+          'Allow the custom HTTP MCP server to run tool "agent_metrics_api__get_metrics_api_usage_users"?',
+      },
+    });
+
+    expect(connection.responses).toEqual([
+      {
+        id: 146,
+        result: { action: "accept", content: null, _meta: null },
+      },
+    ]);
+    expect(events).toContainEqual({
+      type: "approval.resolved",
+      data: {
+        decision: "auto",
+        kind: "mcp_elicitation",
+        server: "custom_http_agent_metrics_api",
+        tool: "agent_metrics_api__get_metrics_api_usage_users",
+      },
+    });
+    expect(events.some(({ type }) => type === "approval.required")).toBe(false);
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
   it("keeps mutating and unknown MCP tools behind manual approval", async () => {
     const { connection, events, completion } = await activeTurn();
     connection.serverRequest({

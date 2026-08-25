@@ -961,20 +961,24 @@ export class CodexAdapter implements RuntimeAdapter {
     const server = params.serverName;
     const prompt = params.message;
     if (typeof server !== "string" || typeof prompt !== "string") return null;
-    const serverKind = MCP_SERVER_ALIASES[server];
-    if (!serverKind) return null;
-    const readOnlyTools = readOnlyToolsForServer(serverKind);
-    if (!readOnlyTools) return null;
     const match = /^Allow the [^\n]+ MCP server to run tool "([^"]+)"\?$/.exec(
       prompt,
     );
     const tool = match?.[1];
     if (!tool) return null;
-    const definition = run.mcpServers.find(({ name }) => name === serverKind);
+    const serverKind = MCP_SERVER_ALIASES[server] ?? server;
+    const definition = run.mcpServers.find(
+      ({ name }) => name === server || name === serverKind,
+    );
     const explicitMode = definition?.approval?.tools[tool];
     if (explicitMode === "prompt") return null;
     if (explicitMode === "approve") return { server, tool };
     if (definition?.approval?.defaultMode === "prompt") return null;
+    if (definition?.approval?.defaultMode === "approve") {
+      return { server, tool };
+    }
+    const readOnlyTools = readOnlyToolsForServer(serverKind);
+    if (!readOnlyTools) return null;
     if (!run.fullAccess && !readOnlyTools.includes(tool)) return null;
     return { server, tool };
   }
