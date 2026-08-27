@@ -104,6 +104,40 @@ describe("parseExecutionRequest", () => {
     ).toThrow(/embedded credentials/i);
   });
 
+  it("accepts bounded OpenRouter provider-routing preferences", () => {
+    const request = parseExecutionRequest({
+      runId: "run-openrouter",
+      agent: {
+        id: "research",
+        name: "Research",
+        role: "Research",
+        instructions: "Use only configured tools.",
+      },
+      runtime: {
+        type: "openrouter",
+        model: "anthropic/claude-test",
+        authentication: {
+          mode: "api_key",
+          credential: "openrouter-api-key-for-tests",
+          providerRouting: {
+            requireParameters: true,
+            dataCollection: "deny",
+            zdr: true,
+          },
+        },
+      },
+      thread: { runtimeThreadId: null },
+      message: "Review the evidence.",
+      mcpServers: [],
+    });
+
+    expect(request.runtime.authentication?.providerRouting).toEqual({
+      requireParameters: true,
+      dataCollection: "deny",
+      zdr: true,
+    });
+  });
+
   it("accepts the current control-plane aliases without exposing them downstream", () => {
     const request = parseExecutionRequest({
       run_id: "run-legacy",

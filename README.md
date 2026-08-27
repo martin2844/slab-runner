@@ -3,9 +3,9 @@
 Slab Runner is a small local daemon that executes agent turns through registered runtime adapters. The Slab control plane sends an agent definition, a message, a runtime thread identifier, and an allowlist of MCP servers. Runner returns one stable event protocol regardless of the runtime behind it.
 
 Runner ships a stable Codex adapter through `codex app-server`, plus
-experimental Claude Agent SDK, Direct API, and Gemini CLI adapters. Gemini is
-consumed only through its documented `stream-json` interface; Runner never
-parses its human terminal UI.
+experimental Claude Agent SDK, Direct API, Gemini CLI, and OpenRouter adapters.
+Gemini is consumed only through its documented `stream-json` interface; Runner
+never parses its human terminal UI.
 
 ```text
 Next.js control plane
@@ -14,10 +14,10 @@ Next.js control plane
         v
    Slab Runner
         |
-        +-----------+-----------+-----------+
-        |           |           |           |
-        v           v           v           v
- Codex app-server  Claude SDK  Direct API  Gemini CLI
+        +-----------+-----------+-----------+------------+
+        |           |           |           |            |
+        v           v           v           v            v
+ Codex app-server  Claude SDK  Direct API  Gemini CLI  OpenRouter
         |
         +-- Slab Work MCP
         +-- Slab Docs MCP
@@ -31,6 +31,7 @@ Runner owns runtime execution only. It does not persist chats, agent definitions
 - Codex CLI installed and authenticated for Codex runs
 - an Anthropic API key configured in Slab Agents for Claude runs
 - Gemini CLI account authorization in Runner-owned storage for Gemini runs
+- an OpenRouter API key configured in Slab Agents for OpenRouter runs
 
 ## Run locally
 
@@ -58,16 +59,16 @@ container network. It does not accept arbitrary interface addresses.
 
 ## Configuration
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `RUNNER_HOST` | `127.0.0.1` | Listening interface; only `127.0.0.1`, `::1`, or `localhost` are accepted |
-| `RUNNER_PORT` | `6990` | Listening port |
-| `CODEX_BIN` | `codex` | Codex executable path or name |
-| `RUNNER_CODEX_HOME` | `~/.local/state/slab-runner/codex` | Dedicated persistent Codex state used only by Slab Runner |
-| `GEMINI_BIN` | `gemini` | Gemini CLI executable path or name |
-| `RUNNER_GEMINI_HOME` | `~/.local/state/slab-runner/gemini` | Dedicated persistent Gemini account state used only by Slab Runner |
-| `RUNNER_TOKEN` | unset | Optional local bearer token, minimum 16 characters |
-| `RUNNER_TOKEN_FILE` | unset | File containing the bearer token; mutually exclusive with `RUNNER_TOKEN` |
+| Variable             | Default                             | Description                                                               |
+| -------------------- | ----------------------------------- | ------------------------------------------------------------------------- |
+| `RUNNER_HOST`        | `127.0.0.1`                         | Listening interface; only `127.0.0.1`, `::1`, or `localhost` are accepted |
+| `RUNNER_PORT`        | `6990`                              | Listening port                                                            |
+| `CODEX_BIN`          | `codex`                             | Codex executable path or name                                             |
+| `RUNNER_CODEX_HOME`  | `~/.local/state/slab-runner/codex`  | Dedicated persistent Codex state used only by Slab Runner                 |
+| `GEMINI_BIN`         | `gemini`                            | Gemini CLI executable path or name                                        |
+| `RUNNER_GEMINI_HOME` | `~/.local/state/slab-runner/gemini` | Dedicated persistent Gemini account state used only by Slab Runner        |
+| `RUNNER_TOKEN`       | unset                               | Optional local bearer token, minimum 16 characters                        |
+| `RUNNER_TOKEN_FILE`  | unset                               | File containing the bearer token; mutually exclusive with `RUNNER_TOKEN`  |
 
 When `RUNNER_TOKEN` is set, every operational endpoint accepts either `Authorization: Bearer <token>` or `X-Runner-Token: <token>`. `GET /health` remains available for local health probes.
 
@@ -224,10 +225,10 @@ normalized events and logs.
 
 Each server may carry a run-scoped tool policy. `approve` executes without an
 operator pause, `prompt` requires an approval on runtimes that support it, and
-`deny` makes the tool unavailable. Direct API and Gemini remove denied tools
-from discovery; Codex and Claude also reject denied calls locally because their
-provider interfaces cannot guarantee complete tool hiding. Runtimes without an
-approval round-trip omit `prompt` tools.
+`deny` makes the tool unavailable. Direct API, OpenRouter, and Gemini remove
+denied tools from discovery; Codex and Claude also reject denied calls locally
+because their provider interfaces cannot guarantee complete tool hiding.
+Runtimes without an approval round-trip omit `prompt` tools.
 
 For `runtime.type: "claude"`, the authenticated control plane also supplies an
 API-key credential in the private Runner request. Runner replaces it with a
@@ -250,6 +251,14 @@ cost ceiling through this CLI path. Runner therefore rejects Gemini Runs that
 carry either hard limit before starting the process. Headless Gemini cannot
 pause for a Slab approval round-trip: prompt-gated MCP tools are omitted from
 that Run, while explicitly approved tools remain visible.
+
+OpenRouter uses the fixed `https://openrouter.ai/api/v1` Chat Completions
+endpoint. Runner sends provider routing preferences on every model call and
+defaults to providers that support all requested parameters, deny data
+collection, and advertise zero data retention. The control plane may explicitly
+relax those preferences per workspace. OpenRouter's final streaming usage is
+normalized with token counts and provider-reported USD cost for each model call;
+the control plane aggregates those call costs for the Run.
 
 The runtime catalog advertises budget enforcement capabilities explicitly. Consumers
 must treat a missing budget capability as unsupported so rolling upgrades fail

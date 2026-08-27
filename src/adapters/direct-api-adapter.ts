@@ -41,6 +41,7 @@ type ActiveRun = {
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+  totalCostUsd: number | null;
   cancelRequested: boolean;
 };
 
@@ -49,11 +50,28 @@ export type DirectAuthentication = {
   credential: string;
   baseUrl: string;
   apiFormat: "responses" | "chat_completions";
+  providerRouting?: {
+    requireParameters: boolean;
+    dataCollection: "allow" | "deny";
+    zdr: boolean;
+  };
 };
 
 export type DirectApiClientFactory = (
   authentication: DirectAuthentication,
 ) => OpenAI;
+
+export type DirectApiRuntimeProfile = {
+  definition: RuntimeDefinition;
+  providerName: string;
+  authentication:
+    | { kind: "direct" }
+    | {
+        kind: "openrouter";
+        baseUrl: string;
+        providerRouting: NonNullable<DirectAuthentication["providerRouting"]>;
+      };
+};
 
 const MAX_MODEL_CALLS = 32;
 
@@ -82,8 +100,14 @@ export const DIRECT_API_RUNTIME_DEFINITION = {
   },
 } satisfies RuntimeDefinition;
 
+const DIRECT_API_RUNTIME_PROFILE: DirectApiRuntimeProfile = {
+  definition: DIRECT_API_RUNTIME_DEFINITION,
+  providerName: "Direct API",
+  authentication: { kind: "direct" },
+};
+
 export class DirectApiAdapter implements RuntimeAdapter {
-  readonly definition = DIRECT_API_RUNTIME_DEFINITION;
+  readonly definition: RuntimeDefinition;
   readonly #runs = new Map<string, ActiveRun>();
 
   constructor(
@@ -97,7 +121,10 @@ export class DirectApiAdapter implements RuntimeAdapter {
       }),
     private readonly mcpFactory: () => McpToolClient = () =>
       new McpToolClient(),
-  ) {}
+    private readonly profile: DirectApiRuntimeProfile = DIRECT_API_RUNTIME_PROFILE,
+  ) {
+    this.definition = profile.definition;
+  }
 
   start(): Promise<void> {
     return Promise.resolve();
@@ -118,11 +145,13 @@ export class DirectApiAdapter implements RuntimeAdapter {
 
   startThread(request: AgentExecutionRequest): Promise<string> {
     this.assertAuthentication(request);
+    this.assertBudgetSupport(request);
     return Promise.resolve(randomUUID());
   }
 
   resumeThread(request: AgentExecutionRequest): Promise<string> {
     this.assertAuthentication(request);
+    this.assertBudgetSupport(request);
     if (!request.thread.runtimeThreadId) {
       return Promise.reject(
         new RunnerError(
@@ -144,6 +173,7 @@ export class DirectApiAdapter implements RuntimeAdapter {
       );
     }
     const authentication = this.assertAuthentication(context.request);
+    this.assertBudgetSupport(context.request);
     const run: ActiveRun = {
       request: context.request,
       emit: context.emit,
@@ -158,6 +188,7 @@ export class DirectApiAdapter implements RuntimeAdapter {
       inputTokens: 0,
       cachedInputTokens: 0,
       outputTokens: 0,
+      totalCostUsd: null,
       cancelRequested: false,
     };
     this.#runs.set(context.request.runId, run);
@@ -170,7 +201,7 @@ export class DirectApiAdapter implements RuntimeAdapter {
       if (authentication.apiFormat === "responses") {
         await this.runResponses(run, client);
       } else {
-        await this.runChatCompletions(run, client);
+        await this.runChatCompletions(run, client, authentication);
       }
       if (run.cancelRequested) {
         throw new RunnerError("RUN_CANCELLED", "Run was cancelled", 409);
@@ -184,13 +215,13 @@ export class DirectApiAdapter implements RuntimeAdapter {
       if (status === 401 || status === 403) {
         throw new RunnerError(
           "RUNTIME_AUTHENTICATION_REQUIRED",
-          "Direct API authentication failed",
+          `${this.profile.providerName} authentication failed`,
           401,
         );
       }
       throw new RunnerError(
         "RUNTIME_CRASHED",
-        "Direct API runtime could not complete the run",
+        `${this.profile.providerName} runtime could not complete the run`,
         502,
       );
     } finally {
@@ -285,12 +316,12 @@ export class DirectApiAdapter implements RuntimeAdapter {
       { role: "user", content: run.request.message },
     ];
     const tools: Tool[] = this.availableMcpTools(run).map((definition) => ({
-        type: "function",
-        name: definition.providerName,
-        description: definition.description,
-        parameters: definition.inputSchema,
-        strict: false,
-      }));
+      type: "function",
+      name: definition.providerName,
+      description: definition.description,
+      parameters: definition.inputSchema,
+      strict: false,
+    }));
     for (let turn = 0; turn < MAX_MODEL_CALLS; turn += 1) {
       const stream = await client.responses.create(
         {
@@ -387,30 +418,44 @@ export class DirectApiAdapter implements RuntimeAdapter {
   private async runChatCompletions(
     run: ActiveRun,
     client: OpenAI,
+    authentication: DirectAuthentication,
   ): Promise<void> {
     const messages: ChatCompletionMessageParam[] = [
       { role: "system", content: this.systemPrompt(run.request) },
       ...run.request.context.map(({ role, body }) => ({ role, content: body })),
       { role: "user", content: run.request.message },
     ];
-    const tools: ChatCompletionTool[] = this.availableMcpTools(run)
-      .map((definition) => ({
+    const tools: ChatCompletionTool[] = this.availableMcpTools(run).map(
+      (definition) => ({
         type: "function",
         function: {
           name: definition.providerName,
           description: definition.description,
           parameters: definition.inputSchema,
         },
-      }));
+      }),
+    );
     for (let turn = 0; turn < MAX_MODEL_CALLS; turn += 1) {
       const stream = await client.chat.completions.create(
         {
           model: this.model(run.request),
           messages,
-          tools,
-          tool_choice: "auto",
+          ...(tools.length > 0 ? { tools, tool_choice: "auto" as const } : {}),
           stream: true,
-          stream_options: { include_usage: true },
+          ...(this.profile.authentication.kind === "direct"
+            ? { stream_options: { include_usage: true } }
+            : {}),
+          ...(authentication.providerRouting
+            ? {
+                provider: {
+                  require_parameters:
+                    authentication.providerRouting.requireParameters,
+                  data_collection:
+                    authentication.providerRouting.dataCollection,
+                  zdr: authentication.providerRouting.zdr,
+                },
+              }
+            : {}),
           ...(this.remainingOutputTokens(run) != null
             ? { max_tokens: this.remainingOutputTokens(run)! }
             : {}),
@@ -419,6 +464,8 @@ export class DirectApiAdapter implements RuntimeAdapter {
       );
       let text = "";
       let usageObserved = false;
+      let rawUsage: unknown = null;
+      let usageModel: string | null = null;
       let terminalReason: string | null = null;
       const calls = new Map<
         number,
@@ -447,23 +494,39 @@ export class DirectApiAdapter implements RuntimeAdapter {
           calls.set(toolCall.index, current);
         }
         if (chunk.usage) {
+          if (usageObserved) {
+            throw new RunnerError(
+              "RUNTIME_CRASHED",
+              `${this.profile.providerName} emitted multiple usage records for one model call`,
+              502,
+            );
+          }
           usageObserved = true;
-          this.recordUsage(run, {
-            inputTokens: chunk.usage.prompt_tokens,
-            cachedInputTokens:
-              chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
-            outputTokens: chunk.usage.completion_tokens,
-            reasoningOutputTokens:
-              chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0,
-            model: chunk.model,
-          });
+          rawUsage = chunk.usage;
+          usageModel = chunk.model;
         }
       }
-      if (!usageObserved && this.hasHardBudget(run)) {
+      if (
+        !usageObserved &&
+        (this.hasHardBudget(run) ||
+          this.profile.authentication.kind === "openrouter")
+      ) {
         throw new RunnerError(
-          "RUNTIME_BUDGET_UNSUPPORTED",
-          "OpenAI-compatible provider omitted usage required for budget enforcement",
-          409,
+          this.hasHardBudget(run)
+            ? "RUNTIME_BUDGET_UNSUPPORTED"
+            : "RUNTIME_CRASHED",
+          `${this.profile.providerName} omitted required model-call usage`,
+          this.hasHardBudget(run) ? 409 : 502,
+        );
+      }
+      if (usageObserved) {
+        this.recordUsage(
+          run,
+          this.parseChatUsage(
+            rawUsage,
+            usageModel,
+            this.profile.authentication.kind === "openrouter",
+          ),
         );
       }
       if (!terminalReason) {
@@ -530,7 +593,7 @@ export class DirectApiAdapter implements RuntimeAdapter {
     }
     throw new RunnerError(
       "RUNTIME_CRASHED",
-      "Direct API exceeded the maximum model-call loop",
+      `${this.profile.providerName} exceeded the maximum model-call loop`,
       502,
     );
   }
@@ -691,12 +754,16 @@ export class DirectApiAdapter implements RuntimeAdapter {
       outputTokens: number;
       reasoningOutputTokens: number;
       model: string;
+      costUsd?: number | null;
     },
   ): void {
     run.callIndex += 1;
     run.inputTokens += usage.inputTokens;
     run.cachedInputTokens += usage.cachedInputTokens;
     run.outputTokens += usage.outputTokens;
+    if (usage.costUsd != null) {
+      run.totalCostUsd = (run.totalCostUsd ?? 0) + usage.costUsd;
+    }
     const uncachedInputTokens = Math.max(
       0,
       usage.inputTokens - usage.cachedInputTokens,
@@ -712,27 +779,37 @@ export class DirectApiAdapter implements RuntimeAdapter {
       reasoningOutputTokens: usage.reasoningOutputTokens,
       totalTokens: usage.inputTokens + usage.outputTokens,
       model: usage.model,
+      ...(usage.costUsd != null ? { costUsd: usage.costUsd } : {}),
     });
     const budget = run.request.budget;
     const totalTokens = run.inputTokens + run.outputTokens;
     if (budget?.maxTokens != null && totalTokens >= budget.maxTokens) {
       throw new RunnerError(
         "RUNTIME_BUDGET_EXCEEDED",
-        "Direct API stopped after reaching the run token limit",
+        `${this.profile.providerName} stopped after reaching the run token limit`,
         409,
       );
     }
-    if (budget?.maxCostUsd != null && budget.pricing) {
+    if (budget?.maxCostUsd != null) {
       const uncached = Math.max(0, run.inputTokens - run.cachedInputTokens);
-      const cost =
-        (uncached * budget.pricing.inputUsdPerMillion +
-          run.cachedInputTokens * budget.pricing.cachedInputUsdPerMillion +
-          run.outputTokens * budget.pricing.outputUsdPerMillion) /
-        1_000_000;
+      const estimatedCost = budget.pricing
+        ? (uncached * budget.pricing.inputUsdPerMillion +
+            run.cachedInputTokens * budget.pricing.cachedInputUsdPerMillion +
+            run.outputTokens * budget.pricing.outputUsdPerMillion) /
+          1_000_000
+        : null;
+      const cost = run.totalCostUsd ?? estimatedCost;
+      if (cost === null) {
+        throw new RunnerError(
+          "RUNTIME_BUDGET_UNSUPPORTED",
+          `${this.profile.providerName} omitted cost required for budget enforcement`,
+          409,
+        );
+      }
       if (cost >= budget.maxCostUsd) {
         throw new RunnerError(
           "RUNTIME_BUDGET_EXCEEDED",
-          "Direct API stopped after reaching the run cost limit",
+          `${this.profile.providerName} stopped after reaching the run cost limit`,
           409,
         );
       }
@@ -753,14 +830,16 @@ export class DirectApiAdapter implements RuntimeAdapter {
   }
 
   private availableMcpTools(run: ActiveRun): DiscoveredMcpTool[] {
-    return run.mcp.definitions().filter(
-      (definition) =>
-        effectiveMcpToolMode(
-          definition.server,
-          definition.tool,
-          run.request.agent.fullAccess,
-        ) !== "deny",
-    );
+    return run.mcp
+      .definitions()
+      .filter(
+        (definition) =>
+          effectiveMcpToolMode(
+            definition.server,
+            definition.tool,
+            run.request.agent.fullAccess,
+          ) !== "deny",
+      );
   }
 
   private parseArguments(
@@ -830,12 +909,25 @@ export class DirectApiAdapter implements RuntimeAdapter {
     request: AgentExecutionRequest,
   ): DirectAuthentication {
     const authentication = request.runtime.authentication;
-    if (
-      authentication?.mode !== "api_key" ||
-      !authentication.credential ||
-      !authentication.baseUrl ||
-      !authentication.apiFormat
-    ) {
+    if (authentication?.mode !== "api_key" || !authentication.credential) {
+      throw new RunnerError(
+        "RUNTIME_AUTHENTICATION_REQUIRED",
+        `${this.profile.providerName} requires a configured API key`,
+        401,
+      );
+    }
+    if (this.profile.authentication.kind === "openrouter") {
+      return {
+        mode: "api_key",
+        credential: authentication.credential,
+        baseUrl: this.profile.authentication.baseUrl,
+        apiFormat: "chat_completions",
+        providerRouting:
+          authentication.providerRouting ??
+          this.profile.authentication.providerRouting,
+      };
+    }
+    if (!authentication.baseUrl || !authentication.apiFormat) {
       throw new RunnerError(
         "RUNTIME_AUTHENTICATION_REQUIRED",
         "Direct API requires a configured endpoint and API key",
@@ -850,11 +942,25 @@ export class DirectApiAdapter implements RuntimeAdapter {
     };
   }
 
+  private assertBudgetSupport(request: AgentExecutionRequest): void {
+    if (
+      this.profile.authentication.kind === "direct" &&
+      request.budget?.maxCostUsd != null &&
+      !request.budget.pricing
+    ) {
+      throw new RunnerError(
+        "RUNTIME_BUDGET_UNSUPPORTED",
+        "Direct API requires pricing to enforce a run cost limit",
+        409,
+      );
+    }
+  }
+
   private model(request: AgentExecutionRequest): string {
     if (!request.runtime.model) {
       throw new RunnerError(
         "RUNTIME_UNAVAILABLE",
-        "Direct API requires an explicit model",
+        `${this.profile.providerName} requires an explicit model`,
         409,
       );
     }
@@ -885,6 +991,82 @@ export class DirectApiAdapter implements RuntimeAdapter {
   private errorStatus(error: unknown): number | null {
     return error && typeof error === "object" && "status" in error
       ? Number((error as { status?: unknown }).status) || null
+      : null;
+  }
+
+  private parseChatUsage(
+    usage: unknown,
+    model: string | null,
+    requireCost: boolean,
+  ): {
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+    reasoningOutputTokens: number;
+    model: string;
+    costUsd: number | null;
+  } {
+    const record = this.recordValue(usage);
+    const promptDetails = this.recordValue(record?.prompt_tokens_details);
+    const completionDetails = this.recordValue(
+      record?.completion_tokens_details,
+    );
+    const inputTokens = this.nonnegativeInteger(record?.prompt_tokens);
+    const outputTokens = this.nonnegativeInteger(record?.completion_tokens);
+    const cachedInputTokens =
+      promptDetails?.cached_tokens === undefined
+        ? 0
+        : this.nonnegativeInteger(promptDetails.cached_tokens);
+    const reasoningOutputTokens =
+      completionDetails?.reasoning_tokens === undefined
+        ? 0
+        : this.nonnegativeInteger(completionDetails.reasoning_tokens);
+    const rawCost = record?.cost;
+    const costUsd =
+      requireCost &&
+      typeof rawCost === "number" &&
+      Number.isFinite(rawCost) &&
+      rawCost >= 0
+        ? rawCost
+        : null;
+    if (
+      !record ||
+      inputTokens === null ||
+      outputTokens === null ||
+      cachedInputTokens === null ||
+      cachedInputTokens > inputTokens ||
+      reasoningOutputTokens === null ||
+      reasoningOutputTokens > outputTokens ||
+      !model ||
+      (requireCost && costUsd === null)
+    ) {
+      throw new RunnerError(
+        "RUNTIME_CRASHED",
+        `${this.profile.providerName} returned invalid model-call usage`,
+        502,
+      );
+    }
+    return {
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+      reasoningOutputTokens,
+      model,
+      costUsd,
+    };
+  }
+
+  private recordValue(value: unknown): Record<string, unknown> | null {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  }
+
+  private nonnegativeInteger(value: unknown): number | null {
+    return typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value >= 0
+      ? value
       : null;
   }
 }

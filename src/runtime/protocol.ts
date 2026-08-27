@@ -58,6 +58,13 @@ export interface AgentExecutionRequest {
       credential: string;
       baseUrl?: string | undefined;
       apiFormat?: "responses" | "chat_completions" | undefined;
+      providerRouting?:
+        | {
+            requireParameters: boolean;
+            dataCollection: "allow" | "deny";
+            zdr: boolean;
+          }
+        | undefined;
     } | null;
   };
   budget?: {
@@ -186,6 +193,13 @@ const canonicalRequestSchema = z.object({
           }, "Direct API URLs must use HTTP(S) without embedded credentials")
           .optional(),
         apiFormat: z.enum(["responses", "chat_completions"]).optional(),
+        providerRouting: z
+          .object({
+            requireParameters: z.boolean(),
+            dataCollection: z.enum(["allow", "deny"]),
+            zdr: z.boolean(),
+          })
+          .optional(),
       })
       .nullable()
       .default(null),
