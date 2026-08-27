@@ -764,6 +764,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
           0,
         ) || null,
       totalCostUsd: message.total_cost_usd,
+      costSource: "sdk_estimated",
       durationMs: message.duration_ms,
       modelUsage: models,
     });

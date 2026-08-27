@@ -807,6 +807,7 @@ it("marks Claude usage as a run aggregate with provider turn count", async () =>
       uncachedInputTokens: 110,
       outputTokens: 20,
       totalTokens: 170,
+      costSource: "sdk_estimated",
     }),
   ]);
 });

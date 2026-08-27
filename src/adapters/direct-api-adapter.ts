@@ -779,7 +779,9 @@ export class DirectApiAdapter implements RuntimeAdapter {
       reasoningOutputTokens: usage.reasoningOutputTokens,
       totalTokens: usage.inputTokens + usage.outputTokens,
       model: usage.model,
-      ...(usage.costUsd != null ? { costUsd: usage.costUsd } : {}),
+      ...(usage.costUsd != null
+        ? { costUsd: usage.costUsd, costSource: "provider_reported" }
+        : {}),
     });
     const budget = run.request.budget;
     const totalTokens = run.inputTokens + run.outputTokens;

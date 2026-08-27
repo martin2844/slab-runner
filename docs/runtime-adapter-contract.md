@@ -79,7 +79,10 @@ Adapters must preserve these invariants regardless of native provider behavior:
 - recoverable provider errors are sanitized `runtime.warning` events and do not
   automatically fail the run;
 - usage uses `usage.updated` with normalized input, cached, uncached, output,
-  and context-window fields when the provider supplies them;
+  and context-window fields when the provider supplies them. Costs carry an
+  explicit provenance: `provider_reported` for provider-billed usage or
+  `sdk_estimated` for an SDK estimate. Consumers must not infer billing
+  provenance from a numeric cost alone;
 - approvals use Slab approval IDs and `approve | deny`, not native IDs or
   decision names;
 - cancellation settles as normalized `RUN_CANCELLED` only after the adapter has

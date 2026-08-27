@@ -226,6 +226,7 @@ describe("OpenRouterAdapter", () => {
     ).toMatchObject({
       totalTokens: 120,
       costUsd: 0.002,
+      costSource: "provider_reported",
     });
     expect(
       events.find(({ type }) => type === "usage.updated")?.data,
