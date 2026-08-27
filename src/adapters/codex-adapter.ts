@@ -28,7 +28,7 @@ import type {
 import {
   effectiveMcpToolPolicy,
   MCP_SERVER_ALIASES,
-  readOnlyToolsForServer,
+  effectiveMcpToolMode,
 } from "../runtime/mcp-policy.js";
 
 interface NativeApproval {
@@ -468,13 +468,17 @@ export class CodexAdapter implements RuntimeAdapter {
               http_headers: server.headers,
               enabled: true,
               required: true,
-              default_tools_approval_mode: policy.defaultMode,
+              default_tools_approval_mode:
+                policy.defaultMode === "approve" ? "approve" : "prompt",
               ...(Object.keys(policy.tools).length > 0
                 ? {
                     tools: Object.fromEntries(
                       Object.entries(policy.tools).map(([tool, mode]) => [
                         tool,
-                        { approval_mode: mode },
+                        {
+                          approval_mode:
+                            mode === "approve" ? "approve" : "prompt",
+                        },
                       ]),
                     ),
                   }
@@ -895,8 +899,8 @@ export class CodexAdapter implements RuntimeAdapter {
       return;
     }
 
-    const autoApprovedTool = this.autoApprovedMcpTool(message, run);
-    if (autoApprovedTool) {
+    const governedTool = this.mcpElicitationPolicy(message, run);
+    if (governedTool?.mode === "approve") {
       this.connection.respond(message.id, {
         action: "accept",
         content: null,
@@ -905,8 +909,22 @@ export class CodexAdapter implements RuntimeAdapter {
       run.emit("approval.resolved", {
         decision: "auto",
         kind: "mcp_elicitation",
-        server: autoApprovedTool.server,
-        tool: autoApprovedTool.tool,
+        server: governedTool.server,
+        tool: governedTool.tool,
+      });
+      return;
+    }
+    if (governedTool?.mode === "deny") {
+      this.connection.respond(message.id, {
+        action: "decline",
+        content: null,
+        _meta: null,
+      });
+      run.emit("approval.resolved", {
+        decision: "policy_denied",
+        kind: "mcp_elicitation",
+        server: governedTool.server,
+        tool: governedTool.tool,
       });
       return;
     }
@@ -944,7 +962,9 @@ export class CodexAdapter implements RuntimeAdapter {
               toolId: pendingTool.toolId,
               toolArguments: pendingTool.arguments,
             }
-          : {}),
+          : governedTool && governedTool.tool !== "unknown"
+            ? { tool: governedTool.tool }
+            : {}),
       }),
     );
   }
@@ -1009,35 +1029,62 @@ export class CodexAdapter implements RuntimeAdapter {
     return "mcp_elicitation";
   }
 
-  private autoApprovedMcpTool(
+  private mcpElicitationPolicy(
     message: RpcServerRequest,
     run: ActiveRun,
-  ): { server: string; tool: string } | null {
+  ): {
+    server: string;
+    tool: string;
+    mode: "approve" | "prompt" | "deny";
+  } | null {
     if (message.method !== "mcpServer/elicitation/request") return null;
     const params = message.params ?? {};
     const server = params.serverName;
     const prompt = params.message;
-    if (typeof server !== "string" || typeof prompt !== "string") return null;
-    const match = /^Allow the [^\n]+ MCP server to run tool "([^"]+)"\?$/.exec(
-      prompt,
-    );
-    const tool = match?.[1];
-    if (!tool) return null;
+    if (typeof server !== "string") {
+      return { server: "unknown", tool: "unknown", mode: "deny" };
+    }
     const serverKind = MCP_SERVER_ALIASES[server] ?? server;
     const definition = run.mcpServers.find(
       ({ name }) => name === server || name === serverKind,
     );
-    const explicitMode = definition?.approval?.tools[tool];
-    if (explicitMode === "prompt") return null;
-    if (explicitMode === "approve") return { server, tool };
-    if (definition?.approval?.defaultMode === "prompt") return null;
-    if (definition?.approval?.defaultMode === "approve") {
-      return { server, tool };
+    if (!definition) return { server, tool: "unknown", mode: "deny" };
+    const promptTool =
+      typeof prompt === "string"
+        ? /^Allow the [^\n]+ MCP server to run tool "([^"]+)"\?$/.exec(
+            prompt,
+          )?.[1]
+        : null;
+    const requestedToolId =
+      typeof params.itemId === "string" ? params.itemId : null;
+    const openTools = [...run.toolStarts.entries()].filter(
+      ([toolId, started]) =>
+        (!requestedToolId || toolId === requestedToolId) &&
+        started.server === server &&
+        typeof started.tool === "string",
+    );
+    const correlatedTool =
+      openTools.length === 1 ? openTools[0]?.[1].tool : null;
+    if (promptTool && correlatedTool && promptTool !== correlatedTool) {
+      return { server, tool: correlatedTool, mode: "deny" };
     }
-    const readOnlyTools = readOnlyToolsForServer(serverKind);
-    if (!readOnlyTools) return null;
-    if (!run.fullAccess && !readOnlyTools.includes(tool)) return null;
-    return { server, tool };
+    const tool = correlatedTool ?? promptTool;
+    if (!tool) {
+      const policy = effectiveMcpToolPolicy(definition, run.fullAccess);
+      const containsDeny =
+        policy.defaultMode === "deny" ||
+        Object.values(policy.tools).some((mode) => mode === "deny");
+      return {
+        server,
+        tool: "unknown",
+        mode: containsDeny ? "deny" : "prompt",
+      };
+    }
+    return {
+      server,
+      tool,
+      mode: effectiveMcpToolMode(definition, tool, run.fullAccess),
+    };
   }
 
   private approvalResponse(

@@ -23,6 +23,7 @@ import type {
 } from "../runtime/adapter.js";
 import { RunnerError } from "../runtime/errors.js";
 import type { AgentExecutionRequest } from "../runtime/protocol.js";
+import { effectiveMcpToolMode } from "../runtime/mcp-policy.js";
 import { McpToolClient, type DiscoveredMcpTool } from "./mcp-tool-client.js";
 
 type PendingApproval = {
@@ -65,7 +66,7 @@ export const DIRECT_API_RUNTIME_DEFINITION = {
     freshThreads: true,
     threadResume: true,
     mcpServers: true,
-    mcpToolAllowlist: false,
+    mcpToolAllowlist: true,
     toolApprovals: true,
     toolLifecycle: true,
     runtimeWarnings: true,
@@ -283,13 +284,13 @@ export class DirectApiAdapter implements RuntimeAdapter {
       ...run.request.context.map(({ role, body }) => ({ role, content: body })),
       { role: "user", content: run.request.message },
     ];
-    const tools: Tool[] = run.mcp.definitions().map((definition) => ({
-      type: "function",
-      name: definition.providerName,
-      description: definition.description,
-      parameters: definition.inputSchema,
-      strict: false,
-    }));
+    const tools: Tool[] = this.availableMcpTools(run).map((definition) => ({
+        type: "function",
+        name: definition.providerName,
+        description: definition.description,
+        parameters: definition.inputSchema,
+        strict: false,
+      }));
     for (let turn = 0; turn < MAX_MODEL_CALLS; turn += 1) {
       const stream = await client.responses.create(
         {
@@ -392,8 +393,7 @@ export class DirectApiAdapter implements RuntimeAdapter {
       ...run.request.context.map(({ role, body }) => ({ role, content: body })),
       { role: "user", content: run.request.message },
     ];
-    const tools: ChatCompletionTool[] = run.mcp
-      .definitions()
+    const tools: ChatCompletionTool[] = this.availableMcpTools(run)
       .map((definition) => ({
         type: "function",
         function: {
@@ -552,6 +552,23 @@ export class DirectApiAdapter implements RuntimeAdapter {
         message: "Tool is unavailable.",
       });
     }
+    if (
+      effectiveMcpToolMode(
+        definition.server,
+        definition.tool,
+        run.request.agent.fullAccess,
+      ) === "deny"
+    ) {
+      return this.rejectUndispatchedTool(run, {
+        toolId,
+        providerName,
+        rawArguments,
+        definition,
+        reason: "policy_denied",
+        code: "TOOL_DENIED",
+        message: "Tool is not available for this agent.",
+      });
+    }
     const parsedArguments = this.parseArguments(rawArguments);
     if (!parsedArguments.ok) {
       return this.rejectUndispatchedTool(run, {
@@ -633,12 +650,13 @@ export class DirectApiAdapter implements RuntimeAdapter {
     definition: DiscoveredMcpTool,
     argumentsValue: Record<string, unknown>,
   ): Promise<boolean> {
-    const defaultMode =
-      definition.server.approval?.defaultMode ??
-      (run.request.agent.fullAccess ? "approve" : "prompt");
-    const mode =
-      definition.server.approval?.tools[definition.tool] ?? defaultMode;
+    const mode = effectiveMcpToolMode(
+      definition.server,
+      definition.tool,
+      run.request.agent.fullAccess,
+    );
     if (mode === "approve") return Promise.resolve(true);
+    if (mode === "deny") return Promise.resolve(false);
     const approvalId = randomUUID();
     return new Promise<boolean>((resolve) => {
       const measurement = measurePayload(argumentsValue, run.redactor);
@@ -734,6 +752,17 @@ export class DirectApiAdapter implements RuntimeAdapter {
     );
   }
 
+  private availableMcpTools(run: ActiveRun): DiscoveredMcpTool[] {
+    return run.mcp.definitions().filter(
+      (definition) =>
+        effectiveMcpToolMode(
+          definition.server,
+          definition.tool,
+          run.request.agent.fullAccess,
+        ) !== "deny",
+    );
+  }
+
   private parseArguments(
     value: string,
   ): { ok: true; value: Record<string, unknown> } | { ok: false } {
@@ -754,8 +783,8 @@ export class DirectApiAdapter implements RuntimeAdapter {
       providerName: string;
       rawArguments: string;
       definition?: DiscoveredMcpTool;
-      reason: "invalid_arguments" | "tool_not_found";
-      code: "INVALID_TOOL_ARGUMENTS" | "TOOL_NOT_FOUND";
+      reason: "invalid_arguments" | "tool_not_found" | "policy_denied";
+      code: "INVALID_TOOL_ARGUMENTS" | "TOOL_NOT_FOUND" | "TOOL_DENIED";
       message: string;
     },
   ): string {

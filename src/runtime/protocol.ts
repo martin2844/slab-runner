@@ -29,13 +29,15 @@ export interface RunnerEvent {
   data: Record<string, unknown>;
 }
 
+export type McpApprovalMode = "approve" | "prompt" | "deny";
+
 export interface McpServerDefinition {
   name: string;
   url: string;
   headers: Record<string, string>;
   approval?: {
-    defaultMode: "approve" | "prompt";
-    tools: Record<string, "approve" | "prompt">;
+    defaultMode: McpApprovalMode;
+    tools: Record<string, McpApprovalMode>;
   };
 }
 
@@ -103,9 +105,12 @@ const mcpServerSchema = z
       .optional(),
     approval: z
       .object({
-        defaultMode: z.enum(["approve", "prompt"]),
+        defaultMode: z.enum(["approve", "prompt", "deny"]),
         tools: z
-          .record(z.string().min(1).max(200), z.enum(["approve", "prompt"]))
+          .record(
+            z.string().min(1).max(200),
+            z.enum(["approve", "prompt", "deny"]),
+          )
           .default({}),
       })
       .optional(),

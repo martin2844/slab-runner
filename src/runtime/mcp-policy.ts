@@ -1,4 +1,7 @@
-import type { McpServerDefinition } from "./protocol.js";
+import type {
+  McpApprovalMode,
+  McpServerDefinition,
+} from "./protocol.js";
 
 export const READ_ONLY_MCP_TOOLS: Record<string, readonly string[]> = {
   work: [
@@ -49,7 +52,7 @@ export function readOnlyToolsForServer(
 export function effectiveMcpToolPolicy(
   server: McpServerDefinition,
   fullAccess: boolean,
-): { defaultMode: "approve" | "prompt"; tools: Record<string, "approve" | "prompt"> } {
+): { defaultMode: McpApprovalMode; tools: Record<string, McpApprovalMode> } {
   if (server.approval) return server.approval;
   const readOnlyTools = fullAccess ? undefined : readOnlyToolsForServer(server.name);
   return {
@@ -58,4 +61,15 @@ export function effectiveMcpToolPolicy(
       (readOnlyTools ?? []).map((tool) => [tool, "approve" as const]),
     ),
   };
+}
+
+export function effectiveMcpToolMode(
+  server: McpServerDefinition,
+  tool: string,
+  fullAccess: boolean,
+): McpApprovalMode {
+  const policy = effectiveMcpToolPolicy(server, fullAccess);
+  return Object.prototype.hasOwnProperty.call(policy.tools, tool)
+    ? policy.tools[tool]!
+    : policy.defaultMode;
 }

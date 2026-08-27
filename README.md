@@ -187,6 +187,14 @@ Content-Type: application/json
       "url": "http://127.0.0.1:6969/mcp",
       "credentials": {
         "bearerToken": "..."
+      },
+      "approval": {
+        "defaultMode": "deny",
+        "tools": {
+          "get_issue": "approve",
+          "assign_issue": "approve",
+          "set_issue_status": "prompt"
+        }
       }
     },
     {
@@ -213,6 +221,13 @@ Runner accepts up to eight uniquely named HTTP(S) MCP servers selected by the
 control plane for that run. Credentials are forwarded to the selected runtime
 as MCP HTTP headers, held in memory for the active run, and redacted from
 normalized events and logs.
+
+Each server may carry a run-scoped tool policy. `approve` executes without an
+operator pause, `prompt` requires an approval on runtimes that support it, and
+`deny` makes the tool unavailable. Direct API and Gemini remove denied tools
+from discovery; Codex and Claude also reject denied calls locally because their
+provider interfaces cannot guarantee complete tool hiding. Runtimes without an
+approval round-trip omit `prompt` tools.
 
 For `runtime.type: "claude"`, the authenticated control plane also supplies an
 API-key credential in the private Runner request. Runner replaces it with a

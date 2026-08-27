@@ -216,6 +216,47 @@ describe("CodexAdapter", () => {
     );
   });
 
+  it("maps denied MCP tools to runtime prompts for local enforcement", async () => {
+    const connection = new FakeAppServerConnection();
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "work",
+          url: "http://127.0.0.1:6969/mcp",
+          headers: {},
+          approval: {
+            defaultMode: "deny",
+            tools: {
+              assign_issue: "approve",
+              set_issue_status: "prompt",
+              delete_issue: "deny",
+            },
+          },
+        },
+      ],
+    });
+
+    await adapter.startThread(request);
+    const call = connection.requests.find(
+      ({ method }) => method === "thread/start",
+    );
+    expect(call?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          work: {
+            default_tools_approval_mode: "prompt",
+            tools: {
+              assign_issue: { approval_mode: "approve" },
+              set_issue_status: { approval_mode: "prompt" },
+              delete_issue: { approval_mode: "prompt" },
+            },
+          },
+        },
+      },
+    });
+  });
+
   it("keeps Email send behind approval even for a full-access agent", async () => {
     const request = executionRequest({
       mcpServers: [
@@ -1099,7 +1140,13 @@ describe("CodexAdapter", () => {
   });
 
   it("auto-approves the restricted PostHog analytics tools", async () => {
-    const { connection, events, completion } = await activeTurn();
+    const request = executionRequest();
+    request.mcpServers.push({
+      name: "posthog",
+      url: "https://agents.example.test/api/integrations/posthog/mcp",
+      headers: {},
+    });
+    const { connection, events, completion } = await activeTurn(request);
     connection.serverRequest({
       id: 145,
       method: "mcpServer/elicitation/request",
@@ -1193,6 +1240,288 @@ describe("CodexAdapter", () => {
         message: 'Allow the work MCP server to run tool "create_issue"?',
       },
     });
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
+  it("declines policy-denied MCP tools without requesting approval", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "work",
+          url: "http://127.0.0.1:6969/mcp",
+          headers: {},
+          approval: {
+            defaultMode: "prompt",
+            tools: { delete_issue: "deny" },
+          },
+        },
+      ],
+    });
+    const { connection, events, completion } = await activeTurn(request);
+    connection.serverRequest({
+      id: 147,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName: "work",
+        message: 'Allow the work MCP server to run tool "delete_issue"?',
+      },
+    });
+
+    expect(connection.responses).toEqual([
+      {
+        id: 147,
+        result: { action: "decline", content: null, _meta: null },
+      },
+    ]);
+    expect(events).toContainEqual({
+      type: "approval.resolved",
+      data: {
+        decision: "policy_denied",
+        kind: "mcp_elicitation",
+        server: "work",
+        tool: "delete_issue",
+      },
+    });
+    expect(events.some(({ type }) => type === "approval.required")).toBe(
+      false,
+    );
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
+  it("fails closed when a deny-capable MCP request cannot identify its tool", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "work",
+          url: "http://127.0.0.1:6969/mcp",
+          headers: {},
+          approval: {
+            defaultMode: "prompt",
+            tools: { delete_issue: "deny" },
+          },
+        },
+      ],
+    });
+    const { connection, events, completion } = await activeTurn(request);
+    connection.serverRequest({
+      id: 148,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName: "work",
+        message: "Permit this Work action?",
+      },
+    });
+
+    expect(connection.responses).toEqual([
+      {
+        id: 148,
+        result: { action: "decline", content: null, _meta: null },
+      },
+    ]);
+    expect(events.some(({ type }) => type === "approval.required")).toBe(
+      false,
+    );
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
+  it("fails closed for MCP requests from servers outside the run", async () => {
+    const { connection, events, completion } = await activeTurn();
+    connection.serverRequest({
+      id: 149,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName: "unassigned",
+        message: 'Allow the unassigned MCP server to run tool "get_secret"?',
+      },
+    });
+
+    expect(connection.responses).toEqual([
+      {
+        id: 149,
+        result: { action: "decline", content: null, _meta: null },
+      },
+    ]);
+    expect(events.some(({ type }) => type === "approval.required")).toBe(
+      false,
+    );
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
+  it("retains operator approval for ambiguous prompt-only MCP requests", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "work",
+          url: "http://127.0.0.1:6969/mcp",
+          headers: {},
+          approval: { defaultMode: "prompt", tools: {} },
+        },
+      ],
+    });
+    const { connection, events, completion } = await activeTurn(request);
+    connection.serverRequest({
+      id: 150,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        serverName: "work",
+        message: "Permit this Work action?",
+      },
+    });
+
+    expect(connection.responses).toEqual([]);
+    expect(events.at(-1)).toMatchObject({
+      type: "approval.required",
+      data: {
+        kind: "mcp_elicitation",
+        server: "work",
+        message: "Permit this Work action?",
+      },
+    });
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
+  it("uses a correlated open tool when deny-capable MCP wording is ambiguous", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "work",
+          url: "http://127.0.0.1:6969/mcp",
+          headers: {},
+          approval: {
+            defaultMode: "deny",
+            tools: { set_issue_status: "prompt" },
+          },
+        },
+      ],
+    });
+    const { connection, events, completion } = await activeTurn(request);
+    connection.serverNotification({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "status-call-1",
+          type: "mcpToolCall",
+          server: "work",
+          tool: "set_issue_status",
+          arguments: { key: "COO-1", status: "done" },
+        },
+      },
+    });
+    connection.serverRequest({
+      id: 151,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "status-call-1",
+        serverName: "work",
+        message: "Permit this Work action?",
+      },
+    });
+
+    expect(connection.responses).toEqual([]);
+    expect(events.at(-1)).toMatchObject({
+      type: "approval.required",
+      data: {
+        kind: "mcp_elicitation",
+        server: "work",
+        tool: "set_issue_status",
+        toolId: "status-call-1",
+      },
+    });
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
+  it("declines conflicting structured and prose MCP tool identities", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "work",
+          url: "http://127.0.0.1:6969/mcp",
+          headers: {},
+          approval: {
+            defaultMode: "deny",
+            tools: { get_issue: "approve" },
+          },
+        },
+      ],
+    });
+    const { connection, events, completion } = await activeTurn(request);
+    connection.serverNotification({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "delete-call-1",
+          type: "mcpToolCall",
+          server: "work",
+          tool: "delete_issue",
+          arguments: { key: "COO-1" },
+        },
+      },
+    });
+    connection.serverRequest({
+      id: 152,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "delete-call-1",
+        serverName: "work",
+        message: 'Allow the work MCP server to run tool "get_issue"?',
+      },
+    });
+
+    expect(connection.responses).toEqual([
+      {
+        id: 152,
+        result: { action: "decline", content: null, _meta: null },
+      },
+    ]);
+    expect(events.some(({ type }) => type === "approval.required")).toBe(
+      false,
+    );
 
     connection.serverNotification({
       method: "turn/completed",

@@ -27,6 +27,10 @@ import type {
   AgentExecutionRequest,
   McpServerDefinition,
 } from "../runtime/protocol.js";
+import {
+  effectiveMcpToolMode,
+  effectiveMcpToolPolicy,
+} from "../runtime/mcp-policy.js";
 
 export type ClaudeQueryFactory = typeof createClaudeQuery;
 
@@ -61,34 +65,6 @@ type ActiveRun = {
   assistantText: string;
   usageCallIndex: number;
   cancelRequested: boolean;
-};
-
-const READ_ONLY_MCP_TOOLS: Record<string, readonly string[]> = {
-  work: [
-    "list_projects",
-    "get_project",
-    "list_issues",
-    "get_issue",
-    "search_issues",
-    "list_comments",
-    "list_links",
-    "get_blocked_issues",
-    "get_issue_history",
-  ],
-  docs: [
-    "list_docs",
-    "search_docs",
-    "get_doc",
-    "list_doc_revisions",
-    "get_doc_revision",
-  ],
-  posthog: ["list_projects", "query_analytics"],
-  email: [
-    "email_list_accounts",
-    "email_search",
-    "email_get_message",
-    "email_list_threads",
-  ],
 };
 
 export const CLAUDE_RUNTIME_DEFINITION = {
@@ -421,17 +397,14 @@ export class ClaudeAdapter implements RuntimeAdapter {
   private allowedTools(request: AgentExecutionRequest): string[] {
     const allowed = new Set<string>();
     for (const server of request.mcpServers) {
-      const defaultMode =
-        server.approval?.defaultMode ??
-        (request.agent.fullAccess ? "approve" : "prompt");
-      if (defaultMode === "approve") {
+      const policy = effectiveMcpToolPolicy(
+        server,
+        request.agent.fullAccess,
+      );
+      if (policy.defaultMode === "approve") {
         allowed.add(`mcp__${server.name}__*`);
-      } else {
-        for (const tool of READ_ONLY_MCP_TOOLS[server.name] ?? []) {
-          allowed.add(`mcp__${server.name}__${tool}`);
-        }
       }
-      for (const [tool, mode] of Object.entries(server.approval?.tools ?? {})) {
+      for (const [tool, mode] of Object.entries(policy.tools)) {
         const name = `mcp__${server.name}__${tool}`;
         if (mode === "approve") allowed.add(name);
         else allowed.delete(name);
@@ -448,13 +421,21 @@ export class ClaudeAdapter implements RuntimeAdapter {
   ): Promise<PermissionResult> {
     const target = this.mcpTarget(run.request.mcpServers, toolName);
     if (target) {
-      const defaultMode =
-        target.server.approval?.defaultMode ??
-        (run.request.agent.fullAccess ? "approve" : "prompt");
-      const mode = target.server.approval?.tools[target.tool] ?? defaultMode;
+      const mode = effectiveMcpToolMode(
+        target.server,
+        target.tool,
+        run.request.agent.fullAccess,
+      );
       if (mode === "approve") {
         return Promise.resolve({
           behavior: "allow",
+          toolUseID: options.toolUseID,
+        });
+      }
+      if (mode === "deny") {
+        return Promise.resolve({
+          behavior: "deny",
+          message: "Tool is not available for this agent.",
           toolUseID: options.toolUseID,
         });
       }

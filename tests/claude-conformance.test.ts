@@ -628,6 +628,70 @@ it("includes explicit Email send context in Claude approvals", async () => {
   await completion;
 });
 
+it("rejects policy-denied Claude MCP tools without operator approval", async () => {
+  const provider = new FakeQueryDriver();
+  const adapter = new ClaudeAdapter(
+    "/tmp/safe-runner-cwd",
+    new FakeCredentialBoundary(),
+    provider.factory,
+  );
+  const request = executionRequest({
+    runtime: {
+      type: "claude",
+      model: "claude-test",
+      authentication: {
+        mode: "api_key",
+        credential: "anthropic-test-credential",
+      },
+    },
+    mcpServers: [
+      {
+        name: "work",
+        url: "http://work.invalid/mcp",
+        headers: {},
+        approval: {
+          defaultMode: "deny",
+          tools: { assign_issue: "approve", set_issue_status: "prompt" },
+        },
+      },
+    ],
+  });
+  const runtimeThreadId = await adapter.startThread(request);
+  const events: Array<{
+    type: string;
+    data: Record<string, unknown> | undefined;
+  }> = [];
+  const completion = adapter.runTurn({
+    request,
+    runtimeThreadId,
+    emit: (type, data) => events.push({ type, data }),
+  });
+  await provider.waitForTurnStart();
+
+  expect(provider.options?.allowedTools).toContain("mcp__work__assign_issue");
+  expect(provider.options?.allowedTools).not.toContain(
+    "mcp__work__delete_issue",
+  );
+  await expect(
+    provider.options!.canUseTool!(
+      "mcp__work__delete_issue",
+      { key: "COO-1", expected_version: 1 },
+      {
+        signal: new AbortController().signal,
+        toolUseID: "denied-delete",
+        requestId: "denied-delete-request",
+      },
+    ),
+  ).resolves.toMatchObject({
+    behavior: "deny",
+    message: "Tool is not available for this agent.",
+  });
+  expect(events.some(({ type }) => type === "approval.required")).toBe(false);
+
+  provider.completeTurn("completed");
+  await completion;
+});
+
 it("settles SDK-aborted approvals exactly once", async () => {
   const provider = new FakeQueryDriver();
   const adapter = new ClaudeAdapter(

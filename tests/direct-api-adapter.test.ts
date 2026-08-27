@@ -274,13 +274,84 @@ describe("Direct API adapter", () => {
       id: "direct_api",
       capabilities: {
         mcpServers: true,
-        mcpToolAllowlist: false,
+        mcpToolAllowlist: true,
         toolApprovals: true,
         budgetIncrementalUsage: true,
         budgetNativeTokenLimit: false,
         budgetNativeCostLimit: false,
       },
     });
+  });
+
+  it("hides denied MCP tools and rejects an undisclosed provider call", async () => {
+    const first = responseObject(
+      [
+        {
+          id: "denied_item",
+          type: "function_call",
+          call_id: "denied_call",
+          name: "mcp__work__constructor",
+          arguments: '{"key":"COO-1"}',
+          status: "completed",
+        },
+      ],
+      "",
+    );
+    const second = responseObject(
+      [
+        {
+          id: "message_done",
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [
+            {
+              type: "output_text",
+              text: "unavailable",
+              annotations: [],
+              logprobs: [],
+            },
+          ],
+        },
+      ],
+      "unavailable",
+    );
+    const remote = await provider((_request, call) => ({
+      body: sse(call === 1 ? first : second),
+    }));
+    const work: McpServerDefinition = {
+      name: "work",
+      url: "http://work.invalid/mcp",
+      headers: {},
+      approval: { defaultMode: "deny", tools: {} },
+    };
+    const mcp = new FakeMcp(work, false, "constructor");
+    const request = directRequest(remote.baseUrl, { mcpServers: [work] });
+    const adapter = new DirectApiAdapter(undefined, () => mcp);
+    const events: Array<{
+      type: string;
+      data: Record<string, unknown> | undefined;
+    }> = [];
+
+    await adapter.runTurn({
+      request,
+      runtimeThreadId: await adapter.startThread(request),
+      emit: (type, data) => events.push({ type, data }),
+    });
+
+    expect((remote.requests[0]?.body as { tools?: unknown[] }).tools).toEqual(
+      [],
+    );
+    expect(mcp.calls).toEqual([]);
+    expect(events.some(({ type }) => type === "approval.required")).toBe(
+      false,
+    );
+    const denied = events.find(({ type }) => type === "tool.failed");
+    expect(denied?.data).toMatchObject({
+      reason: "policy_denied",
+      success: false,
+    });
+    expect(JSON.stringify(remote.requests[1]?.body)).toContain("TOOL_DENIED");
   });
 
   it("includes explicit Email send context in Direct API approvals", async () => {

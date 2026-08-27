@@ -340,6 +340,47 @@ describe("GeminiAdapter", () => {
     await completion;
   });
 
+  it("filters prompt and denied tools while retaining explicit allows", async () => {
+    const current = harness();
+    const completion = current.adapter.runTurn({
+      request: executionRequest({
+        runtime: { type: "gemini", model: null, authentication: null },
+        mcpServers: [
+          {
+            name: "work",
+            url: "https://work.example.test/mcp",
+            headers: {},
+            approval: {
+              defaultMode: "deny",
+              tools: {
+                get_issue: "approve",
+                assign_issue: "approve",
+                set_issue_status: "prompt",
+                delete_issue: "deny",
+              },
+            },
+          },
+        ],
+      }),
+      runtimeThreadId: "gemini-session",
+      emit: vi.fn(),
+    });
+    await expect.poll(() => current.process()).not.toBeNull();
+    const settings = JSON.parse(
+      await readFile(current.settingsPath(), "utf8"),
+    ) as {
+      mcpServers: Record<string, { includeTools?: string[] }>;
+    };
+    expect(settings.mcpServers.work?.includeTools).toEqual([
+      "get_issue",
+      "assign_issue",
+    ]);
+
+    current.process()!.event({ type: "result", status: "success", stats: {} });
+    current.process()!.close();
+    await completion;
+  });
+
   it("fails a successful model turn when required MCP discovery failed", async () => {
     const current = harness();
     const completion = current.adapter.runTurn({

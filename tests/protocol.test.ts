@@ -181,8 +181,12 @@ describe("parseExecutionRequest", () => {
           url: "http://127.0.0.1:6981/mcp",
           credentials: { bearerToken: "scoped-token" },
           approval: {
-            defaultMode: "approve",
-            tools: { email_send: "prompt", email_reply: "prompt" },
+            defaultMode: "deny",
+            tools: {
+              email_search: "approve",
+              email_send: "prompt",
+              email_reply: "deny",
+            },
           },
         },
       ],
@@ -192,8 +196,12 @@ describe("parseExecutionRequest", () => {
       name: "email",
       headers: { Authorization: "Bearer scoped-token" },
       approval: {
-        defaultMode: "approve",
-        tools: { email_send: "prompt", email_reply: "prompt" },
+        defaultMode: "deny",
+        tools: {
+          email_search: "approve",
+          email_send: "prompt",
+          email_reply: "deny",
+        },
       },
     });
   });

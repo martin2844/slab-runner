@@ -104,8 +104,9 @@ all consumers.
 
 Codex is the first conforming adapter. It currently declares two limitations:
 
-- `mcpToolAllowlist: false`: Codex receives approval policy per MCP tool, but
-  Runner does not enforce a visibility allowlist inside the server;
+- `mcpToolAllowlist: false`: Codex receives approval policy per MCP tool and
+  Runner rejects denied requests, but the provider does not expose a complete
+  visibility allowlist;
 - `modelDiscovery: false` and `modelValidation: false`: a configured model is
   passed to Codex, but Runner does not yet enumerate or pre-validate Codex
   models.
@@ -131,8 +132,9 @@ thread. Provider authentication failures use
 acceptance proves its complete MCP and approval semantics.
 
 Claude currently declares `mcpToolAllowlist: false`. Run-scoped MCP server
-assignment and per-tool approval policies are enforced, but the SDK permission
-options do not remove unlisted tools from the model-visible server catalog.
+assignment and per-tool approval policies are enforced, including immediate
+local rejection for denied tools, but the SDK permission options do not remove
+unlisted tools from the model-visible server catalog.
 Result usage is emitted as an explicit Run aggregate with the provider turn
 count; consumers must not derive per-call initial or peak context from it.
 
@@ -152,9 +154,11 @@ events. Provider redirects are disabled.
 The adapter converts only the MCP servers assigned to that Run into provider
 function definitions. Provider function arguments are parsed as JSON objects;
 invalid arguments fail terminally and are never forwarded to MCP. MCP calls
-remain subject to the existing per-server approval policy, and every call is
-wrapped in exactly one normalized started/terminal lifecycle. The model cannot
-construct an arbitrary HTTP request through this adapter.
+remain subject to the per-server tool policy. Denied tools are removed from the
+model-visible function list and rejected locally if a provider still requests
+one; every dispatched call is wrapped in exactly one normalized
+started/terminal lifecycle. The model cannot construct an arbitrary HTTP
+request through this adapter.
 
 Responses are requested with provider storage disabled. Chat continuity is
 implemented by control-plane conversation rehydration, while non-chat Runs
@@ -165,8 +169,8 @@ Usage is normalized once per provider model call. Hard token and priced cost
 limits are enforced at each reported usage boundary; a provider that omits
 usage fails closed when a hard limit is active. Direct API does not claim a
 native token or cost ceiling, and an upstream call can cross a limit before its
-terminal usage becomes observable. `mcpToolAllowlist` remains false because
-the model sees every tool exposed by each assigned MCP server.
+terminal usage becomes observable. `mcpToolAllowlist` is true because explicit
+deny rules remove tools from both Responses and Chat Completions definitions.
 
 ## Gemini CLI experimental adapter
 

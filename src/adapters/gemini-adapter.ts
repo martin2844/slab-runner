@@ -205,7 +205,7 @@ function allowedTools(
 } {
   const approval = effectiveMcpToolPolicy(server, fullAccess);
   const entries = Object.entries(approval.tools);
-  if (approval.defaultMode === "prompt") {
+  if (approval.defaultMode !== "approve") {
     return {
       includeTools: entries
         .filter(([, mode]) => mode === "approve")
@@ -213,7 +213,7 @@ function allowedTools(
     };
   }
   const excluded = entries
-    .filter(([, mode]) => mode === "prompt")
+    .filter(([, mode]) => mode !== "approve")
     .map(([tool]) => tool);
   return excluded.length > 0 ? { excludeTools: excluded } : {};
 }
