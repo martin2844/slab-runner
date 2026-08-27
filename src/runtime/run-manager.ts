@@ -28,6 +28,7 @@ import {
 } from "node:fs";
 import { constants } from "node:fs";
 import { dirname } from "node:path";
+import type { ActivityLease, RuntimeActivityGate } from "./activity-gate.js";
 
 export type RunStatus =
   | "running"
@@ -47,6 +48,7 @@ interface ManagedRun {
   cleanupTimer: NodeJS.Timeout | null;
   cancelRequested: boolean;
   pendingApprovalIds: Set<string>;
+  activityLease: ActivityLease | null;
 }
 
 interface RuntimeHealthProbe {
@@ -85,6 +87,10 @@ export class RunManager {
   readonly #restartableRunIds = new Set<string>();
   readonly #healthChecks = new Map<string, RuntimeHealthProbe>();
   private readonly adapters: ReadonlyMap<string, RuntimeAdapter>;
+  private readonly runtimeActivityGates: ReadonlyMap<
+    string,
+    RuntimeActivityGate
+  >;
 
   constructor(
     adapters: ReadonlyMap<string, RuntimeAdapter>,
@@ -92,6 +98,7 @@ export class RunManager {
     private readonly retentionMs = 15 * 60 * 1_000,
     private readonly journalFile?: string,
     private readonly healthTimeoutMs = 5_000,
+    runtimeActivityGates: ReadonlyMap<string, RuntimeActivityGate> = new Map(),
   ) {
     for (const [runtimeId, adapter] of adapters) {
       if (runtimeId !== adapter.definition.id) {
@@ -101,6 +108,7 @@ export class RunManager {
       }
     }
     this.adapters = new Map(adapters);
+    this.runtimeActivityGates = new Map(runtimeActivityGates);
     if (journalFile && existsSync(journalFile)) {
       const histories = new Map<string, RunnerEvent[]>();
       let journalBuffer = readFileSync(journalFile);
@@ -187,6 +195,7 @@ export class RunManager {
           cleanupTimer: null,
           cancelRequested: false,
           pendingApprovalIds: new Set(),
+          activityLease: null,
         };
         this.#runs.set(runId, run);
         if (!terminal) {
@@ -224,23 +233,32 @@ export class RunManager {
       );
     }
     this.requireAdapter(request.runtime.type);
-    if (!this.#restartableRunIds.delete(request.runId)) {
-      this.recordRunIdentity(request.runId);
+    const activityLease = this.runtimeActivityGates
+      .get(request.runtime.type)
+      ?.beginRun() ?? null;
+    try {
+      if (!this.#restartableRunIds.delete(request.runId)) {
+        this.recordRunIdentity(request.runId);
+      }
+      const run: ManagedRun = {
+        runId: request.runId,
+        request,
+        status: "running",
+        nextEventId: 1,
+        events: [],
+        listeners: new Set(),
+        cleanupTimer: null,
+        cancelRequested: false,
+        pendingApprovalIds: new Set(),
+        activityLease,
+      };
+      this.#runs.set(request.runId, run);
+      void this.execute(run);
+      return { runId: request.runId, status: "running" };
+    } catch (error) {
+      activityLease?.release();
+      throw error;
     }
-    const run: ManagedRun = {
-      runId: request.runId,
-      request,
-      status: "running",
-      nextEventId: 1,
-      events: [],
-      listeners: new Set(),
-      cleanupTimer: null,
-      cancelRequested: false,
-      pendingApprovalIds: new Set(),
-    };
-    this.#runs.set(request.runId, run);
-    void this.execute(run);
-    return { runId: request.runId, status: "running" };
   }
 
   has(runId: string): boolean {
@@ -460,6 +478,8 @@ export class RunManager {
         });
       }
     } finally {
+      run.activityLease?.release();
+      run.activityLease = null;
       this.scheduleCleanup(run);
     }
   }

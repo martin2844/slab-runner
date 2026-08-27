@@ -5,12 +5,14 @@ import { CodexAdapter } from "./adapters/codex-adapter.js";
 import { ClaudeAdapter } from "./adapters/claude-adapter.js";
 import { DirectApiAdapter } from "./adapters/direct-api-adapter.js";
 import { GeminiAdapter } from "./adapters/gemini-adapter.js";
+import { CodexAuthManager } from "./auth/codex-auth-manager.js";
 import { prepareIsolatedCodexHome } from "./app-server/codex-home.js";
 import { ProcessAppServerConnection } from "./app-server/process-connection.js";
 import { loadConfig } from "./config.js";
 import { createHttpApp } from "./http/app.js";
 import { JsonLogger } from "./lib/logger.js";
 import { Redactor } from "./lib/redactor.js";
+import { RuntimeActivityGate } from "./runtime/activity-gate.js";
 import { RunManager } from "./runtime/run-manager.js";
 
 async function listen(
@@ -63,14 +65,19 @@ async function main(): Promise<void> {
       });
     }
   }
+  const codexActivityGate = new RuntimeActivityGate();
   const runManager = new RunManager(
     new Map(adapters.map((adapter) => [adapter.definition.id, adapter])),
     logger,
     undefined,
     config.runJournalFile,
+    undefined,
+    new Map([["codex", codexActivityGate]]),
   );
+  const codexAuth = new CodexAuthManager(connection, codexActivityGate);
   const app = createHttpApp({
     runManager,
+    codexAuth,
     ...(config.runnerToken ? { runnerToken: config.runnerToken } : {}),
   });
   const server = createServer(app);

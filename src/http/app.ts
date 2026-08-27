@@ -5,6 +5,7 @@ import express, {
   type Response,
 } from "express";
 import { ZodError } from "zod";
+import type { CodexAuthManager } from "../auth/codex-auth-manager.js";
 import { publicError, RunnerError } from "../runtime/errors.js";
 import {
   approvalDecisionSchema,
@@ -35,6 +36,7 @@ function sendEvent(response: Response, event: RunnerEvent): void {
 
 export function createHttpApp(options: {
   runManager: RunManager;
+  codexAuth?: CodexAuthManager;
   runnerToken?: string;
 }) {
   const app = express();
@@ -66,6 +68,52 @@ export function createHttpApp(options: {
       next(error);
     }
   });
+
+  if (options.codexAuth) {
+    const codexAuth = options.codexAuth;
+    app.get("/auth/codex", async (_request, response, next) => {
+      try {
+        response.json({ data: await codexAuth.status() });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/auth/codex/device-login", async (_request, response, next) => {
+      try {
+        response.status(202).json({ data: await codexAuth.startDeviceLogin() });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.delete(
+      "/auth/codex/device-login/:loginId",
+      async (request, response, next) => {
+        try {
+          const loginId = request.params.loginId;
+          if (!loginId) {
+            throw new RunnerError(
+              "INVALID_REQUEST",
+              "Pending Codex authentication was not found",
+              404,
+            );
+          }
+          response.json({ data: await codexAuth.cancelDeviceLogin(loginId) });
+        } catch (error) {
+          next(error);
+        }
+      },
+    );
+
+    app.post("/auth/codex/logout", async (_request, response, next) => {
+      try {
+        response.json({ data: await codexAuth.logout() });
+      } catch (error) {
+        next(error);
+      }
+    });
+  }
 
   app.post("/runs", (request, response, next) => {
     try {

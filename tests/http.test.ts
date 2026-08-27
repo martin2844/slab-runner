@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CodexAuthManager } from "../src/auth/codex-auth-manager.js";
 import { createHttpApp } from "../src/http/app.js";
 import { SilentLogger } from "../src/lib/logger.js";
 import type {
@@ -13,11 +14,13 @@ import type {
 } from "../src/runtime/adapter.js";
 import { RunnerError } from "../src/runtime/errors.js";
 import type { AgentExecutionRequest } from "../src/runtime/protocol.js";
+import { RuntimeActivityGate } from "../src/runtime/activity-gate.js";
 import { RunManager } from "../src/runtime/run-manager.js";
 import {
   TEST_RUNTIME_DEFINITION,
   testRuntimeHealth,
 } from "./helpers/runtime.js";
+import { FakeAppServerConnection } from "./helpers/fake-connection.js";
 
 class HttpTestAdapter implements RuntimeAdapter {
   readonly definition = TEST_RUNTIME_DEFINITION;
@@ -95,14 +98,23 @@ afterEach(async () => {
   openServers.clear();
 });
 
-async function testApp(runnerToken?: string) {
+async function testApp(
+  runnerToken?: string,
+  codexAuth?: CodexAuthManager,
+  runtimeActivityGates: ReadonlyMap<string, RuntimeActivityGate> = new Map(),
+) {
   const adapter = new HttpTestAdapter();
   const manager = new RunManager(
     new Map<string, RuntimeAdapter>([[adapter.definition.id, adapter]]),
     new SilentLogger(),
+    undefined,
+    undefined,
+    undefined,
+    runtimeActivityGates,
   );
   const app = createHttpApp({
     runManager: manager,
+    ...(codexAuth ? { codexAuth } : {}),
     ...(runnerToken ? { runnerToken } : {}),
   });
   const server = createServer(app);
@@ -134,6 +146,86 @@ describe("Runner HTTP API", () => {
         },
       ],
     });
+  });
+
+  it("exposes structured Codex device authentication without token fields", async () => {
+    const connection = new FakeAppServerConnection();
+    let authenticated = false;
+    connection.requestHandler = (method) => {
+      if (method === "account/read") {
+        return Promise.resolve({
+          account: authenticated
+            ? {
+                type: "chatgpt",
+                email: "operator@example.com",
+                planType: "plus",
+                accessToken: "never-return-this",
+              }
+            : null,
+        });
+      }
+      if (method === "account/login/start") return Promise.resolve({
+        type: "chatgptDeviceCode",
+        loginId: "login-http",
+        verificationUrl: "https://auth.openai.com/codex/device",
+        userCode: "HTTP-1234",
+      });
+      if (method === "account/logout") {
+        authenticated = false;
+        return Promise.resolve({});
+      }
+      return Promise.resolve({});
+    };
+    const activityGate = new RuntimeActivityGate();
+    const codexAuth = new CodexAuthManager(connection, activityGate);
+    const { server } = await testApp(
+      undefined,
+      codexAuth,
+      new Map([["codex", activityGate]]),
+    );
+
+    await request(server).get("/auth/codex").expect(200, {
+      data: {
+        status: "not_authenticated",
+        authMode: null,
+        email: null,
+        planType: null,
+        login: null,
+      },
+    });
+    const started = await request(server)
+      .post("/auth/codex/device-login")
+      .expect(202);
+    expect(started.body).toMatchObject({
+      data: {
+        loginId: "login-http",
+        verificationUrl: "https://auth.openai.com/codex/device",
+        userCode: "HTTP-1234",
+        status: "pending",
+      },
+    });
+    expect(JSON.stringify(started.body)).not.toContain("Token");
+    await request(server).post("/runs").send(validBody).expect(409, {
+      error: {
+        code: "RUNTIME_UNAVAILABLE",
+        message: "Runtime authentication is changing",
+      },
+    });
+
+    await request(server)
+      .delete("/auth/codex/device-login/login-http")
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({ data: { status: "cancelled" } });
+      });
+    authenticated = true;
+    await request(server)
+      .post("/auth/codex/logout")
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body).toMatchObject({ data: { status: "not_authenticated" } });
+        expect(JSON.stringify(body)).not.toContain("never-return-this");
+      });
   });
 
   it("creates a run immediately and exposes replayable SSE events", async () => {
