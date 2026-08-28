@@ -15,6 +15,7 @@ import {
   measurePayload,
   summarizeSearchTool,
 } from "../lib/observability.js";
+import { toolTargetMetadata } from "../lib/tool-event-metadata.js";
 import type {
   RuntimeAdapter,
   RuntimeDefinition,
@@ -652,6 +653,12 @@ export class ClaudeAdapter implements RuntimeAdapter {
       argumentsBytes: measurement.bytes,
       argumentsApproxTokens: measurement.approxTokens,
       ...(measurement.preview ? { argumentsPreview: measurement.preview } : {}),
+      ...toolTargetMetadata(
+        target?.server.name ?? "runtime",
+        target?.tool ?? name,
+        input,
+        run.redactor,
+      ),
     };
     run.toolStarts.set(toolId, {
       startedAt: observedAt.toISOString(),

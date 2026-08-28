@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import type { Readable } from "node:stream";
 import { constants as fsConstants } from "node:fs";
 import { approxTokens, measurePayload } from "../lib/observability.js";
+import { toolTargetMetadata } from "../lib/tool-event-metadata.js";
 import { collectHeaderSecrets, type Redactor } from "../lib/redactor.js";
 import type {
   RuntimeAdapter,
@@ -887,6 +888,12 @@ export class GeminiAdapter implements RuntimeAdapter {
       argumentsBytes: measurement.bytes,
       argumentsApproxTokens: measurement.approxTokens,
       ...(measurement.preview ? { argumentsPreview: measurement.preview } : {}),
+      ...toolTargetMetadata(
+        target?.server ?? "runtime",
+        target?.tool ?? name,
+        argumentsValue,
+        run.redactor,
+      ),
     };
     run.toolStarts.set(toolId, {
       startedAt: startedAt.toISOString(),

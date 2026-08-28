@@ -14,6 +14,7 @@ import type {
 import { collectHeaderSecrets, type Redactor } from "../lib/redactor.js";
 import { emailApprovalContext } from "../lib/approval-context.js";
 import { approxTokens, measurePayload } from "../lib/observability.js";
+import { toolTargetMetadata } from "../lib/tool-event-metadata.js";
 import type {
   RuntimeAdapter,
   RuntimeDefinition,
@@ -666,6 +667,12 @@ export class DirectApiAdapter implements RuntimeAdapter {
       argumentsBytes: measurement.bytes,
       argumentsApproxTokens: measurement.approxTokens,
       ...(measurement.preview ? { argumentsPreview: measurement.preview } : {}),
+      ...toolTargetMetadata(
+        definition.server.name,
+        definition.tool,
+        argumentsValue,
+        run.redactor,
+      ),
     };
     run.emit("tool.started", base);
     try {

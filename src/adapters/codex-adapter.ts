@@ -12,6 +12,7 @@ import {
   measureText,
   summarizeSearchTool,
 } from "../lib/observability.js";
+import { toolTargetMetadata } from "../lib/tool-event-metadata.js";
 import type {
   RuntimeAdapter,
   RuntimeAuthMode,
@@ -690,6 +691,7 @@ export class CodexAdapter implements RuntimeAdapter {
       ...(argumentsMeasurement.preview
         ? { argumentsPreview: argumentsMeasurement.preview }
         : {}),
+      ...toolTargetMetadata(server, tool, argumentsValue, run.redactor),
       ...(this.#captureFullToolPayloads
         ? { debugArgumentsPayload: run.redactor.value(argumentsValue) }
         : {}),
