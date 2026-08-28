@@ -15,6 +15,7 @@ import type { Readable } from "node:stream";
 import { constants as fsConstants } from "node:fs";
 import { approxTokens, measurePayload } from "../lib/observability.js";
 import { toolTargetMetadata } from "../lib/tool-event-metadata.js";
+import { failOpenTools } from "../lib/open-tool-lifecycle.js";
 import { collectHeaderSecrets, type Redactor } from "../lib/redactor.js";
 import type {
   RuntimeAdapter,
@@ -928,20 +929,11 @@ export class GeminiAdapter implements RuntimeAdapter {
   }
 
   private failOpenTools(run: ActiveRun): void {
-    const completedAt = new Date();
-    for (const [toolId, start] of run.toolStarts) {
-      if (run.terminalToolIds.has(toolId)) continue;
-      run.emit("tool.failed", {
-        ...start.data,
-        completedAt: completedAt.toISOString(),
-        durationMs: Math.max(0, completedAt.getTime() - start.timestampMs),
-        success: false,
-        status: "failed",
-        reason: "terminal_event_missing",
-      });
-      run.terminalToolIds.add(toolId);
-    }
-    run.toolStarts.clear();
+    failOpenTools({
+      emit: run.emit,
+      starts: run.toolStarts,
+      terminalIds: run.terminalToolIds,
+    });
   }
 
   private emitUsage(run: ActiveRun, stats: JsonRecord): void {

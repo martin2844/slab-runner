@@ -13,6 +13,7 @@ import {
   summarizeSearchTool,
 } from "../lib/observability.js";
 import { toolTargetMetadata } from "../lib/tool-event-metadata.js";
+import { failOpenTools } from "../lib/open-tool-lifecycle.js";
 import type {
   RuntimeAdapter,
   RuntimeAuthMode,
@@ -1155,25 +1156,17 @@ export class CodexAdapter implements RuntimeAdapter {
   }
 
   private failOpenTools(run: ActiveRun): void {
-    const completedAt = new Date();
-    for (const [toolId, started] of [...run.toolStarts]) {
-      run.toolStarts.delete(toolId);
-      run.terminalToolIds.add(toolId);
-      run.emit(
-        "tool.failed",
+    failOpenTools({
+      emit: run.emit,
+      starts: run.toolStarts,
+      terminalIds: run.terminalToolIds,
+      normalize: (toolId, event) =>
         this.safeRecord(run, {
-          ...started.data,
+          ...event,
           toolId,
           runId: run.runId,
-          status: "failed",
-          success: false,
-          reason: "terminal_event_missing",
-          startedAt: started.startedAt,
-          completedAt: completedAt.toISOString(),
-          durationMs: Math.max(0, completedAt.getTime() - started.timestampMs),
         }),
-      );
-    }
+    });
   }
 
   private safeRecord(run: ActiveRun, value: unknown): Record<string, unknown> {
