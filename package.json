@@ -1,6 +1,7 @@
 {
   "name": "slab-runner",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "A local runtime daemon that executes agents and emits normalized Slab events.",
   "type": "module",

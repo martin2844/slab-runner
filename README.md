@@ -387,3 +387,7 @@ The main module boundaries are:
 Future Kimi, OpenAI API, or other provider support must implement
 `RuntimeAdapter` and pass the shared conformance suite without changing the HTTP
 contract or normalized event names.
+
+## License
+
+[MIT](LICENSE)
