@@ -92,6 +92,10 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=Slab Runner
+            org.opencontainers.image.description=Runtime daemon for Slab agents
+            org.opencontainers.image.licenses=MIT
       - id: build
         uses: docker/build-push-action@v6
         with:
