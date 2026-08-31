@@ -43,6 +43,7 @@ interface NativeApproval {
 interface ActiveRun {
   runId: string;
   threadId: string;
+  model: string | null;
   turnId: string | null;
   emit: RuntimeEventSink;
   redactor: Redactor;
@@ -111,6 +112,7 @@ export class CodexAdapter implements RuntimeAdapter {
   readonly definition = CODEX_RUNTIME_DEFINITION;
   readonly #runs = new Map<string, ActiveRun>();
   readonly #runByThread = new Map<string, ActiveRun>();
+  readonly #threadModels = new Map<string, string>();
   readonly #captureFullToolPayloads =
     process.env.RUNNER_OBSERVABILITY_FULL_PAYLOADS === "true";
 
@@ -186,7 +188,7 @@ export class CodexAdapter implements RuntimeAdapter {
       "thread/start",
       this.threadParams(request),
     );
-    return this.readThreadId(result);
+    return this.rememberThreadModel(result, request.runtime.model);
   }
 
   async resumeThread(request: AgentExecutionRequest): Promise<string> {
@@ -204,7 +206,7 @@ export class CodexAdapter implements RuntimeAdapter {
         threadId,
         ...this.threadParams(request),
       });
-      return this.readThreadId(result);
+      return this.rememberThreadModel(result, request.runtime.model);
     } catch (error) {
       throw normalizeRuntimeError(error);
     }
@@ -236,6 +238,9 @@ export class CodexAdapter implements RuntimeAdapter {
     const run: ActiveRun = {
       runId: context.request.runId,
       threadId: context.runtimeThreadId,
+      model:
+        this.#threadModels.get(context.runtimeThreadId) ??
+        context.request.runtime.model,
       turnId: null,
       emit: context.emit,
       redactor: collectHeaderSecrets(
@@ -528,6 +533,25 @@ export class CodexAdapter implements RuntimeAdapter {
     return id;
   }
 
+  private rememberThreadModel(
+    result: unknown,
+    requestedModel: string | null,
+  ): string {
+    const threadId = this.readThreadId(result);
+    const resolvedModel = this.readResolvedModel(result) ?? requestedModel;
+    if (resolvedModel) this.#threadModels.set(threadId, resolvedModel);
+    return threadId;
+  }
+
+  private readResolvedModel(result: unknown): string | null {
+    const model = this.record(result).model;
+    if (typeof model !== "string") return null;
+    const normalized = model.trim();
+    return normalized.length > 0 && normalized.length <= 200
+      ? normalized
+      : null;
+  }
+
   private readTurnId(result: unknown): string {
     const id = this.record(this.record(result).turn).id;
     if (typeof id !== "string" || !id) {
@@ -773,6 +797,7 @@ export class CodexAdapter implements RuntimeAdapter {
     run.usageCallIndex += 1;
     run.emit("usage.updated", {
       ...usage,
+      ...(run.model ? { model: run.model } : {}),
       callIndex: run.usageCallIndex,
       inputTokens,
       cachedInputTokens,
@@ -1148,6 +1173,7 @@ export class CodexAdapter implements RuntimeAdapter {
     if (this.#runByThread.get(run.threadId) === run) {
       this.#runByThread.delete(run.threadId);
     }
+    this.#threadModels.delete(run.threadId);
     run.approvals.clear();
     run.approvalsByNativeId.clear();
     run.terminalToolIds.clear();

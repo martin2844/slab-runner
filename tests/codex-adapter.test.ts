@@ -644,6 +644,66 @@ describe("CodexAdapter", () => {
     });
   });
 
+  it("reports the model resolved by Codex with usage events", async () => {
+    const connection = new FakeAppServerConnection();
+    connection.requestHandler = (method) => {
+      if (method === "thread/start") {
+        return Promise.resolve({
+          thread: { id: "thread-resolved-model" },
+          model: "gpt-5.6-sol",
+          modelProvider: "openai",
+        });
+      }
+      if (method === "turn/start") {
+        return Promise.resolve({ turn: { id: "turn-1" } });
+      }
+      return Promise.resolve({});
+    };
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+    const request = executionRequest();
+    const runtimeThreadId = await adapter.startThread(request);
+    const events: CapturedEvent[] = [];
+    const completion = adapter.runTurn({
+      request,
+      runtimeThreadId,
+      emit: (type, data = {}) => events.push({ type, data }),
+    });
+    await vi.waitFor(() => {
+      expect(
+        connection.requests.some(({ method }) => method === "turn/start"),
+      ).toBe(true);
+    });
+
+    connection.serverNotification({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: runtimeThreadId,
+        turnId: "turn-1",
+        tokenUsage: {
+          last: {
+            inputTokens: 10,
+            cachedInputTokens: 6,
+            outputTokens: 2,
+            reasoningOutputTokens: 1,
+            totalTokens: 12,
+          },
+        },
+      },
+    });
+    connection.serverNotification({
+      method: "turn/completed",
+      params: {
+        threadId: runtimeThreadId,
+        turn: { id: "turn-1", status: "completed" },
+      },
+    });
+
+    await expect(completion).resolves.toBeUndefined();
+    expect(
+      events.find(({ type }) => type === "usage.updated")?.data,
+    ).toMatchObject({ model: "gpt-5.6-sol" });
+  });
+
   it("treats status-less Codex read tools as successful when they complete", async () => {
     const { connection, events, completion } = await activeTurn();
     for (const item of [
