@@ -10,6 +10,7 @@ export function executionRequest(
       name: "COO",
       role: "Operate the company",
       instructions: "Use Slab Work and Slab Docs.",
+      permissionMode: "guarded",
       fullAccess: false,
     },
     runtime: { type: "codex", model: null },

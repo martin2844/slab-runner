@@ -77,6 +77,7 @@ const validBody: AgentExecutionRequest = {
     name: "COO",
     role: "Operations",
     instructions: "Operate.",
+    permissionMode: "guarded",
     fullAccess: false,
   },
   runtime: { type: "codex", model: null },

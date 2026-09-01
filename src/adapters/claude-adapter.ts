@@ -363,7 +363,15 @@ export class ClaudeAdapter implements RuntimeAdapter {
       ),
       strictMcpConfig: true,
       settingSources: [],
-      permissionMode: "default",
+      permissionMode:
+        run.request.agent.permissionMode === "yolo"
+          ? "bypassPermissions"
+          : run.request.agent.permissionMode === "full"
+            ? "acceptEdits"
+            : "default",
+      ...(run.request.agent.permissionMode === "yolo"
+        ? { allowDangerouslySkipPermissions: true }
+        : {}),
       allowedTools: this.allowedTools(run.request),
       canUseTool: (toolName, input, options) =>
         this.authorizeTool(run, toolName, input, options),

@@ -449,15 +449,36 @@ export class CodexAdapter implements RuntimeAdapter {
   private threadParams(
     request: AgentExecutionRequest,
   ): Record<string, unknown> {
+    const runtimePermissions = this.runtimePermissions(
+      request.agent.permissionMode,
+    );
     return {
       ...(request.runtime.model ? { model: request.runtime.model } : {}),
       cwd: request.cwd ?? this.safeCwd,
-      approvalPolicy: "on-request",
-      sandbox: "read-only",
+      approvalPolicy: runtimePermissions.approvalPolicy,
+      sandbox: runtimePermissions.sandbox,
       serviceName: "slab_runner",
       developerInstructions: this.buildDeveloperInstructions(request),
       config: this.mcpConfig(request.mcpServers, request.agent.fullAccess),
     };
+  }
+
+  private runtimePermissions(
+    permissionMode: AgentExecutionRequest["agent"]["permissionMode"],
+  ) {
+    if (permissionMode === "yolo") {
+      return {
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+      } as const;
+    }
+    if (permissionMode === "full") {
+      return {
+        approvalPolicy: "on-request",
+        sandbox: "workspace-write",
+      } as const;
+    }
+    return { approvalPolicy: "on-request", sandbox: "read-only" } as const;
   }
 
   private mcpConfig(

@@ -443,7 +443,11 @@ export class GeminiAdapter implements RuntimeAdapter {
         "--output-format",
         "stream-json",
         "--approval-mode",
-        "default",
+        context.request.agent.permissionMode === "yolo"
+          ? "yolo"
+          : context.request.agent.permissionMode === "full"
+            ? "auto_edit"
+            : "default",
         "--admin-policy",
         policyFile,
         "--skip-trust",

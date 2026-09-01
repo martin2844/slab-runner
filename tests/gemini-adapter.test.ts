@@ -78,6 +78,28 @@ function harness() {
 }
 
 describe("GeminiAdapter", () => {
+  it("passes explicit yolo mode to the Gemini CLI", async () => {
+    const current = harness();
+    const completion = current.adapter.runTurn({
+      request: executionRequest({
+        runtime: { type: "gemini", model: null, authentication: null },
+        agent: {
+          ...executionRequest().agent,
+          permissionMode: "yolo",
+          fullAccess: true,
+        },
+      }),
+      runtimeThreadId: "gemini-yolo-session",
+      emit: vi.fn(),
+    });
+    await expect.poll(() => current.process()).not.toBeNull();
+    const args = current.processArguments();
+    expect(args[args.indexOf("--approval-mode") + 1]).toBe("yolo");
+    current.process()!.event({ type: "result", status: "success", stats: {} });
+    current.process()!.close();
+    await completion;
+  });
+
   it("marks missing terminal tool events failed exactly once", async () => {
     const current = harness();
     const events: Array<{ type: string; data: Record<string, unknown> }> = [];
@@ -391,6 +413,7 @@ describe("GeminiAdapter", () => {
           name: "COO",
           role: "operator",
           instructions: "Operate safely.",
+          permissionMode: "yolo",
           fullAccess: true,
         },
         mcpServers: [
@@ -426,6 +449,7 @@ describe("GeminiAdapter", () => {
           name: "COO",
           role: "operator",
           instructions: "Operate safely.",
+          permissionMode: "yolo",
           fullAccess: true,
         },
         mcpServers: [
@@ -468,6 +492,7 @@ describe("GeminiAdapter", () => {
           name: "COO",
           role: "operator",
           instructions: "Operate safely.",
+          permissionMode: "yolo",
           fullAccess: true,
         },
         mcpServers: [
@@ -529,6 +554,7 @@ describe("GeminiAdapter", () => {
           name: "COO",
           role: "operator",
           instructions: "Operate safely.",
+          permissionMode: "yolo",
           fullAccess: true,
         },
         mcpServers: [
@@ -579,6 +605,7 @@ describe("GeminiAdapter", () => {
           name: "COO",
           role: "operator",
           instructions: "Operate safely.",
+          permissionMode: "yolo",
           fullAccess: true,
         },
         mcpServers: [

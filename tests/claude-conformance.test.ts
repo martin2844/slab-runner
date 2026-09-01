@@ -401,6 +401,42 @@ it("keeps the Anthropic key outside the Claude child environment", async () => {
   await expect(completion).resolves.toBeUndefined();
 });
 
+it("passes explicit yolo mode through Claude's dangerous permission gate", async () => {
+  const provider = new FakeQueryDriver();
+  const adapter = new ClaudeAdapter(
+    "/tmp/safe-runner-cwd",
+    new FakeCredentialBoundary(),
+    provider.factory,
+  );
+  const request = executionRequest({
+    agent: {
+      ...executionRequest().agent,
+      permissionMode: "yolo",
+      fullAccess: true,
+    },
+    runtime: {
+      type: "claude",
+      model: "claude-test",
+      authentication: {
+        mode: "api_key",
+        credential: "anthropic-yolo-test-credential",
+      },
+    },
+  });
+  const runtimeThreadId = await adapter.startThread(request);
+  const completion = adapter.runTurn({
+    request,
+    runtimeThreadId,
+    emit: () => {},
+  });
+  await provider.waitForTurnStart();
+
+  expect(provider.options?.permissionMode).toBe("bypassPermissions");
+  expect(provider.options?.allowDangerouslySkipPermissions).toBe(true);
+  provider.completeTurn("completed");
+  await completion;
+});
+
 it("passes the native cost limit to Claude and returns a structured budget failure", async () => {
   const provider = new FakeQueryDriver();
   const adapter = new ClaudeAdapter(

@@ -30,7 +30,29 @@ describe("parseExecutionRequest", () => {
     );
     expect(request.context).toEqual([]);
     expect(request.agent.fullAccess).toBe(true);
+    expect(request.agent.permissionMode).toBe("full");
     expect(request.budget).toBeNull();
+  });
+
+  it("preserves explicit full permission mode separately from legacy full access", () => {
+    const request = parseExecutionRequest({
+      runId: "run-full-mode",
+      agent: {
+        id: "operator",
+        name: "Operator",
+        role: "Operations",
+        instructions: "Execute routine work without unnecessary pauses.",
+        permissionMode: "full",
+        fullAccess: true,
+      },
+      runtime: { type: "codex", model: null },
+      thread: { runtimeThreadId: null },
+      message: "Operate",
+      mcpServers: [],
+    });
+
+    expect(request.agent.permissionMode).toBe("full");
+    expect(request.agent.fullAccess).toBe(true);
   });
 
   it("validates bounded run budgets without requiring pricing", () => {

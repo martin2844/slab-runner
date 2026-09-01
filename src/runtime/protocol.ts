@@ -48,6 +48,7 @@ export interface AgentExecutionRequest {
     name: string;
     role: string;
     instructions: string;
+    permissionMode: "guarded" | "full" | "yolo" | "custom";
     fullAccess: boolean;
   };
   runtime: {
@@ -162,6 +163,9 @@ const canonicalRequestSchema = z.object({
     name: z.string().trim().min(1).max(200),
     role: z.string().trim().min(1).max(10_000),
     instructions: z.string().trim().min(1).max(100_000),
+    permissionMode: z
+      .enum(["guarded", "full", "yolo", "custom"])
+      .default("guarded"),
     fullAccess: z.boolean().default(false),
   }),
   runtime: z.object({
@@ -283,6 +287,12 @@ function normalizeExecutionRequest(input: unknown): unknown {
       name,
       role: rawAgent.role,
       instructions: rawAgent.instructions,
+      permissionMode:
+        rawAgent.permissionMode ??
+        rawAgent.permission_mode ??
+        ((rawAgent.fullAccess ?? rawAgent.full_access ?? false)
+          ? "full"
+          : "guarded"),
       fullAccess: rawAgent.fullAccess ?? rawAgent.full_access ?? false,
     },
     runtime: {

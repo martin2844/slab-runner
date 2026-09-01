@@ -216,6 +216,52 @@ describe("CodexAdapter", () => {
     );
   });
 
+  it("uses workspace-write with escalation available for full mode", async () => {
+    const connection = new FakeAppServerConnection();
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+
+    await adapter.startThread(
+      executionRequest({
+        agent: {
+          ...executionRequest().agent,
+          permissionMode: "full",
+          fullAccess: true,
+        },
+      }),
+    );
+
+    const call = connection.requests.find(
+      ({ method }) => method === "thread/start",
+    );
+    expect(call?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+    });
+  });
+
+  it("uses danger-full-access without native prompts for yolo mode", async () => {
+    const connection = new FakeAppServerConnection();
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+
+    await adapter.startThread(
+      executionRequest({
+        agent: {
+          ...executionRequest().agent,
+          permissionMode: "yolo",
+          fullAccess: true,
+        },
+      }),
+    );
+
+    const call = connection.requests.find(
+      ({ method }) => method === "thread/start",
+    );
+    expect(call?.params).toMatchObject({
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+    });
+  });
+
   it("maps denied MCP tools to runtime prompts for local enforcement", async () => {
     const connection = new FakeAppServerConnection();
     const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
