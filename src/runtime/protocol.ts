@@ -30,6 +30,8 @@ export interface RunnerEvent {
 }
 
 export type McpApprovalMode = "approve" | "prompt" | "deny";
+export type ReasoningEffort =
+  "none" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface McpServerDefinition {
   name: string;
@@ -54,6 +56,7 @@ export interface AgentExecutionRequest {
   runtime: {
     type: string;
     model: string | null;
+    effort?: ReasoningEffort | null;
     authentication?: {
       mode: "api_key";
       credential: string;
@@ -179,6 +182,10 @@ const canonicalRequestSchema = z.object({
         "Runtime IDs must use lowercase letters, numbers, underscores, or hyphens",
       ),
     model: z.string().trim().min(1).max(200).nullable(),
+    effort: z
+      .enum(["none", "low", "medium", "high", "xhigh", "max"])
+      .nullable()
+      .default(null),
     authentication: z
       .object({
         mode: z.literal("api_key"),
@@ -298,6 +305,11 @@ function normalizeExecutionRequest(input: unknown): unknown {
     runtime: {
       type: runtimeType,
       model: rawRuntime.model ?? raw.model ?? null,
+      effort:
+        rawRuntime.effort ??
+        raw.reasoningEffort ??
+        raw.reasoning_effort ??
+        null,
       authentication: rawRuntime.authentication ?? null,
     },
     budget: raw.budget ?? null,

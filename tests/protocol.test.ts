@@ -12,7 +12,7 @@ describe("parseExecutionRequest", () => {
         instructions: "Classify work.",
         fullAccess: true,
       },
-      runtime: { type: "codex", model: null },
+      runtime: { type: "codex", model: "gpt-5.6-sol", effort: "high" },
       thread: { runtimeThreadId: null },
       message: "Start",
       mcpServers: [
@@ -32,6 +32,32 @@ describe("parseExecutionRequest", () => {
     expect(request.agent.fullAccess).toBe(true);
     expect(request.agent.permissionMode).toBe("full");
     expect(request.budget).toBeNull();
+    expect(request.runtime).toMatchObject({
+      model: "gpt-5.6-sol",
+      effort: "high",
+    });
+  });
+
+  it("rejects unsupported reasoning effort values", () => {
+    expect(() =>
+      parseExecutionRequest({
+        runId: "run-invalid-effort",
+        agent: {
+          id: "coo",
+          name: "COO",
+          role: "Operations",
+          instructions: "Operate carefully.",
+        },
+        runtime: {
+          type: "codex",
+          model: "gpt-5.6-sol",
+          effort: "unbounded",
+        },
+        thread: { runtimeThreadId: null },
+        message: "Start",
+        mcpServers: [],
+      }),
+    ).toThrow();
   });
 
   it("preserves explicit full permission mode separately from legacy full access", () => {

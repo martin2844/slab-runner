@@ -706,7 +706,13 @@ describe("CodexAdapter", () => {
       return Promise.resolve({});
     };
     const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
-    const request = executionRequest();
+    const request = executionRequest({
+      runtime: {
+        type: "codex",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      },
+    });
     const runtimeThreadId = await adapter.startThread(request);
     const events: CapturedEvent[] = [];
     const completion = adapter.runTurn({
@@ -746,8 +752,14 @@ describe("CodexAdapter", () => {
 
     await expect(completion).resolves.toBeUndefined();
     expect(
+      connection.requests.find(({ method }) => method === "turn/start")?.params,
+    ).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
+    expect(
       events.find(({ type }) => type === "usage.updated")?.data,
-    ).toMatchObject({ model: "gpt-5.6-sol" });
+    ).toMatchObject({
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+    });
   });
 
   it("treats status-less Codex read tools as successful when they complete", async () => {
@@ -1395,9 +1407,7 @@ describe("CodexAdapter", () => {
         tool: "delete_issue",
       },
     });
-    expect(events.some(({ type }) => type === "approval.required")).toBe(
-      false,
-    );
+    expect(events.some(({ type }) => type === "approval.required")).toBe(false);
 
     connection.serverNotification({
       method: "turn/completed",
@@ -1438,9 +1448,7 @@ describe("CodexAdapter", () => {
         result: { action: "decline", content: null, _meta: null },
       },
     ]);
-    expect(events.some(({ type }) => type === "approval.required")).toBe(
-      false,
-    );
+    expect(events.some(({ type }) => type === "approval.required")).toBe(false);
 
     connection.serverNotification({
       method: "turn/completed",
@@ -1468,9 +1476,7 @@ describe("CodexAdapter", () => {
         result: { action: "decline", content: null, _meta: null },
       },
     ]);
-    expect(events.some(({ type }) => type === "approval.required")).toBe(
-      false,
-    );
+    expect(events.some(({ type }) => type === "approval.required")).toBe(false);
 
     connection.serverNotification({
       method: "turn/completed",
@@ -1625,9 +1631,7 @@ describe("CodexAdapter", () => {
         result: { action: "decline", content: null, _meta: null },
       },
     ]);
-    expect(events.some(({ type }) => type === "approval.required")).toBe(
-      false,
-    );
+    expect(events.some(({ type }) => type === "approval.required")).toBe(false);
 
     connection.serverNotification({
       method: "turn/completed",

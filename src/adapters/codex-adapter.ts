@@ -44,6 +44,7 @@ interface ActiveRun {
   runId: string;
   threadId: string;
   model: string | null;
+  effort: AgentExecutionRequest["runtime"]["effort"];
   turnId: string | null;
   emit: RuntimeEventSink;
   redactor: Redactor;
@@ -241,6 +242,7 @@ export class CodexAdapter implements RuntimeAdapter {
       model:
         this.#threadModels.get(context.runtimeThreadId) ??
         context.request.runtime.model,
+      effort: context.request.runtime.effort,
       turnId: null,
       emit: context.emit,
       redactor: collectHeaderSecrets(
@@ -274,6 +276,9 @@ export class CodexAdapter implements RuntimeAdapter {
         ],
         ...(context.request.runtime.model
           ? { model: context.request.runtime.model }
+          : {}),
+        ...(context.request.runtime.effort
+          ? { effort: context.request.runtime.effort }
           : {}),
       });
       run.turnId = this.readTurnId(result);
@@ -791,8 +796,7 @@ export class CodexAdapter implements RuntimeAdapter {
       trackedStart.server = server;
       trackedStart.tool = tool;
       trackedStart.approvalArguments =
-        server === "email" &&
-        (tool === "email_send" || tool === "email_reply")
+        server === "email" && (tool === "email_send" || tool === "email_reply")
           ? run.redactor.value(argumentsValue)
           : undefined;
     }
@@ -819,6 +823,7 @@ export class CodexAdapter implements RuntimeAdapter {
     run.emit("usage.updated", {
       ...usage,
       ...(run.model ? { model: run.model } : {}),
+      ...(run.effort ? { reasoningEffort: run.effort } : {}),
       callIndex: run.usageCallIndex,
       inputTokens,
       cachedInputTokens,
