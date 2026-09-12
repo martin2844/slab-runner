@@ -1584,6 +1584,66 @@ describe("CodexAdapter", () => {
     await completion;
   });
 
+  it("presents exact WhatsApp sending arguments from the correlated Codex tool", async () => {
+    const request = executionRequest({
+      mcpServers: [
+        {
+          name: "whatsapp_personal",
+          url: "http://127.0.0.1:6969/mcp",
+          headers: {},
+          approval: {
+            defaultMode: "deny",
+            tools: { whatsapp_send_text: "prompt" },
+          },
+        },
+      ],
+    });
+    const { connection, events, completion } = await activeTurn(request);
+    connection.serverNotification({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "status-call-1",
+          type: "mcpToolCall",
+          server: "whatsapp_personal",
+          tool: "whatsapp_send_text",
+          arguments: { account: "34600000000@c.us", chatId: "34611111111@c.us", text: "Hello" },
+        },
+      },
+    });
+    connection.serverRequest({
+      id: 151,
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "status-call-1",
+        serverName: "whatsapp_personal",
+        message: "Permit this WhatsApp action?",
+      },
+    });
+
+    expect(connection.responses).toEqual([]);
+    expect(events.at(-1)).toMatchObject({
+      type: "approval.required",
+      data: {
+        kind: "mcp_elicitation",
+        server: "whatsapp_personal",
+        tool: "whatsapp_send_text",
+        toolId: "status-call-1",
+        toolArguments: { account: "34600000000@c.us", chatId: "34611111111@c.us", text: "Hello" },
+      },
+    });
+
+    connection.serverNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { status: "completed" } },
+    });
+    await completion;
+  });
+
   it("declines conflicting structured and prose MCP tool identities", async () => {
     const request = executionRequest({
       mcpServers: [

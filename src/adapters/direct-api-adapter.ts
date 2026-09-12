@@ -12,7 +12,7 @@ import type {
   Tool,
 } from "openai/resources/responses/responses.js";
 import { collectHeaderSecrets, type Redactor } from "../lib/redactor.js";
-import { emailApprovalContext } from "../lib/approval-context.js";
+import { writeApprovalContext } from "../lib/approval-context.js";
 import { approxTokens, measurePayload } from "../lib/observability.js";
 import { toolTargetMetadata } from "../lib/tool-event-metadata.js";
 import type {
@@ -743,7 +743,7 @@ export class DirectApiAdapter implements RuntimeAdapter {
         ...(measurement.preview
           ? { argumentsPreview: measurement.preview }
           : {}),
-        ...emailApprovalContext(
+        ...writeApprovalContext(
           definition.server.name,
           definition.tool,
           argumentsValue,

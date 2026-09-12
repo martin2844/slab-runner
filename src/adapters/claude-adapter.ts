@@ -9,7 +9,7 @@ import {
 import { AnthropicCredentialProxy } from "./anthropic-credential-proxy.js";
 import type { AnthropicCredentialLease } from "./anthropic-credential-proxy.js";
 import { collectHeaderSecrets, type Redactor } from "../lib/redactor.js";
-import { emailApprovalContext } from "../lib/approval-context.js";
+import { writeApprovalContext } from "../lib/approval-context.js";
 import {
   approxTokens,
   measurePayload,
@@ -523,7 +523,7 @@ export class ClaudeAdapter implements RuntimeAdapter {
           ? { argumentsPreview: measurement.preview }
           : {}),
         ...(target
-          ? emailApprovalContext(
+          ? writeApprovalContext(
               target.server.name,
               target.tool,
               input,

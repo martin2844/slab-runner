@@ -1,3 +1,4 @@
+import { requiresExactWriteContext } from "../lib/approval-context.js";
 import { randomUUID } from "node:crypto";
 import type {
   AppServerConnection,
@@ -796,7 +797,7 @@ export class CodexAdapter implements RuntimeAdapter {
       trackedStart.server = server;
       trackedStart.tool = tool;
       trackedStart.approvalArguments =
-        server === "email" && (tool === "email_send" || tool === "email_reply")
+        requiresExactWriteContext(server, tool)
           ? run.redactor.value(argumentsValue)
           : undefined;
     }
@@ -1043,8 +1044,7 @@ export class CodexAdapter implements RuntimeAdapter {
         if (server && started.server !== server) return false;
         if (promptTool && started.tool !== promptTool) return false;
         return (
-          started.server === "email" &&
-          (started.tool === "email_send" || started.tool === "email_reply") &&
+          requiresExactWriteContext(started.server, started.tool) &&
           started.approvalArguments !== undefined
         );
       },
