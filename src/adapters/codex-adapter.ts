@@ -650,10 +650,7 @@ export class CodexAdapter implements RuntimeAdapter {
           }),
         );
         if (params.willRetry !== true) {
-          run.lastError =
-            typeof error.message === "string"
-              ? error.message
-              : "Runtime turn failed";
+          run.lastError = message;
         }
         break;
       }

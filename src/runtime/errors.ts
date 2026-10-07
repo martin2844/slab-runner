@@ -1,6 +1,8 @@
 export const runnerErrorCodes = [
   "RUNTIME_UNAVAILABLE",
   "RUNTIME_AUTHENTICATION_REQUIRED",
+  "RUNTIME_USAGE_LIMIT_EXCEEDED",
+  "RUNTIME_MODEL_UNSUPPORTED",
   "RUNTIME_CRASHED",
   "RUNTIME_BUDGET_EXCEEDED",
   "RUNTIME_BUDGET_UNSUPPORTED",
@@ -58,6 +60,32 @@ export function normalizeRuntimeError(error: unknown): RunnerError {
       "MCP_CONNECTION_FAILED",
       "An allowed MCP server could not be reached",
       502,
+    );
+  }
+  if (/you(?:'|’)ve hit your usage limit|usage limit (?:has been )?(?:reached|exceeded)|insufficient_quota/i.test(message)) {
+    // Only copy a recognized date, never an arbitrary provider error or URL.
+    const retryAt = message.match(
+      /try again at ((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?) \d{1,2}(?:st|nd|rd|th)?, \d{4} \d{1,2}:\d{2} (?:AM|PM))\b/i,
+    )?.[1];
+    return new RunnerError(
+      "RUNTIME_USAGE_LIMIT_EXCEEDED",
+      "The runtime account has reached its usage limit. Check the connected account and its plan or credits in runtime settings." +
+        (retryAt ? ` The provider reports that you can retry at ${retryAt}.` : " Retry after quota is restored."),
+      429,
+    );
+  }
+  if (/model.*(?:is not supported|unsupported|does not exist|not available)|model_not_found/i.test(message)) {
+    return new RunnerError(
+      "RUNTIME_MODEL_UNSUPPORTED",
+      "The selected model is unavailable for the connected runtime account. Choose a supported model in the agent settings.",
+      400,
+    );
+  }
+  if (/refresh_token_(?:reused|expired|invalid)|(?:access|refresh|authentication) token.*(?:expired|invalid)|(?:authentication|login|sign.in) required|incorrect api key|invalid_api_key/i.test(message)) {
+    return new RunnerError(
+      "RUNTIME_AUTHENTICATION_REQUIRED",
+      "The runtime credentials are missing, expired, or invalid. Reconnect the account or update its API key in runtime settings.",
+      401,
     );
   }
   return new RunnerError(
