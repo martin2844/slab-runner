@@ -548,6 +548,27 @@ describe("RunManager", () => {
     });
   });
 
+  it("publishes a continued native thread ID before turn events so the next run keeps its history", async () => {
+    const { adapter, manager } = managerWith();
+    adapter.resumeThread = () => Promise.resolve("continued-thread");
+    manager.create(
+      executionRequest({ thread: { runtimeThreadId: "original-thread" } }),
+    );
+    await vi.waitFor(() => expect(manager.status("run-1")).toBe("completed"));
+    const events = manager.openEventStream("run-1", 0, () => {}).events;
+    expect(events.find(({ type }) => type === "thread.created")?.data).toEqual({
+      runtimeThreadId: "continued-thread",
+      previousRuntimeThreadId: "original-thread",
+      continuity: "resumed",
+    });
+    expect(events.at(-1)?.data).toEqual({
+      runtimeThreadId: "continued-thread",
+    });
+    expect(
+      events.findIndex(({ type }) => type === "thread.created"),
+    ).toBeLessThan(events.findIndex(({ type }) => type === "assistant.delta"));
+  });
+
   it("retains a complete replay window beyond two thousand events", async () => {
     const { adapter, manager } = managerWith();
     adapter.turn = (context) => {
@@ -703,6 +724,129 @@ describe("RunManager", () => {
       "thread.created",
       "run.cancelled",
     ]);
+  });
+
+  it.each(["approve", "deny"] as const)(
+    "uses one Docs decision (%s) for concurrent and later writes, without granting another run or tool",
+    async (decision) => {
+      const { adapter, manager } = managerWith();
+      let context!: RuntimeTurnContext;
+      let complete!: () => void;
+      adapter.turn = (value) => {
+        context = value;
+        return new Promise((resolve) => {
+          complete = resolve;
+        });
+      };
+      adapter.respondToApproval = (runId, approvalId, value) => {
+        adapter.approvals.push({ runId, approvalId, decision: value });
+        context.emit("approval.resolved", { approvalId, decision: value });
+        if (approvalId === "docs-2")
+          queueMicrotask(() =>
+            queueMicrotask(() =>
+              context.emit("approval.required", {
+                approvalId: "docs-tail",
+                server: "docs",
+                tool: "update_doc",
+              }),
+            ),
+          );
+        return Promise.resolve();
+      };
+      const request = executionRequest();
+      request.mcpServers.find(
+        (server) => server.name === "docs",
+      )!.docsRunApproval = true;
+      manager.create(request);
+      await vi.waitFor(() => expect(context).toBeDefined());
+      context.emit("approval.required", {
+        approvalId: "docs-1",
+        server: "docs",
+        tool: "update_doc",
+      });
+      context.emit("approval.required", {
+        approvalId: "docs-2",
+        server: "docs",
+        tool: "create_doc",
+      });
+      const approvals = () =>
+        manager
+          .openEventStream(request.runId, 0, () => {})
+          .events.filter((event) => event.type === "approval.required");
+      expect(approvals()).toHaveLength(1);
+      expect(approvals()[0]?.data.approvalScope).toBe("docs_run");
+      await manager.respondToApproval(request.runId, "docs-1", decision);
+      expect(adapter.approvals.map((item) => item.approvalId)).toEqual([
+        "docs-1",
+        "docs-2",
+        "docs-tail",
+      ]);
+      context.emit("approval.required", {
+        approvalId: "docs-3",
+        server: "docs",
+        tool: "archive_doc",
+      });
+      await vi.waitFor(() => expect(adapter.approvals).toHaveLength(4));
+      expect(
+        adapter.approvals.every((item) => item.decision === decision),
+      ).toBe(true);
+      expect(approvals()).toHaveLength(1);
+      context.emit("approval.required", {
+        approvalId: "work-1",
+        server: "work",
+        tool: "update_issue",
+      });
+      expect(approvals()).toHaveLength(2);
+      expect(adapter.approvals).toHaveLength(4);
+      complete();
+      await vi.waitFor(() =>
+        expect(manager.status(request.runId)).toBe("completed"),
+      );
+      manager.create({ ...request, runId: "second-run" });
+      await vi.waitFor(() => expect(context.request.runId).toBe("second-run"));
+      context.emit("approval.required", {
+        approvalId: "new-docs",
+        server: "docs",
+        tool: "update_doc",
+      });
+      expect(
+        manager
+          .openEventStream("second-run", 0, () => {})
+          .events.find((event) => event.type === "approval.required")?.data
+          .approvalId,
+      ).toBe("new-docs");
+      complete();
+    },
+  );
+
+  it("keeps individual approvals when Docs has not enabled run change tracking", async () => {
+    const { adapter, manager } = managerWith();
+    let context!: RuntimeTurnContext;
+    let complete!: () => void;
+    adapter.turn = (value) => {
+      context = value;
+      return new Promise((resolve) => {
+        complete = resolve;
+      });
+    };
+    manager.create(executionRequest());
+    await vi.waitFor(() => expect(context).toBeDefined());
+    context.emit("approval.required", {
+      approvalId: "one",
+      server: "docs",
+      tool: "update_doc",
+    });
+    context.emit("approval.required", {
+      approvalId: "two",
+      server: "docs",
+      tool: "update_doc",
+    });
+    expect(
+      manager
+        .openEventStream("run-1", 0, () => {})
+        .events.filter((event) => event.type === "approval.required"),
+    ).toHaveLength(2);
+    complete();
   });
 
   it("tracks approval waiting state and forwards the decision", async () => {

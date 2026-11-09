@@ -401,6 +401,35 @@ it("keeps the Anthropic key outside the Claude child environment", async () => {
   await expect(completion).resolves.toBeUndefined();
 });
 
+it.each(["default", "yolo"] as const)("enforces WhatsApp approval through PreToolUse in %s mode", async (mode) => {
+  const provider = new FakeQueryDriver();
+  const adapter = new ClaudeAdapter("/tmp/safe-runner-cwd", new FakeCredentialBoundary(), provider.factory);
+  const request = executionRequest({
+    agent: { ...executionRequest().agent, permissionMode: mode === "default" ? "guarded" : "yolo", fullAccess: mode === "yolo" },
+    runtime: { type: "claude", model: "claude-test", authentication: { mode: "api_key", credential: "anthropic-test-credential" } },
+    mcpServers: [{ name: "whatsapp_personal", url: "http://whatsapp.invalid/mcp", headers: {}, approval: { defaultMode: "approve", tools: { whatsapp_send_text: "prompt" } } }],
+  });
+  const events: Array<{ type: string; data: Record<string, unknown> | undefined }> = [];
+  const completion = adapter.runTurn({ request, runtimeThreadId: await adapter.startThread(request), emit: (type, data) => events.push({ type, data }) });
+  await provider.waitForTurnStart();
+  const hook = provider.options!.hooks!.PreToolUse![0]!.hooks[0]!;
+  const args = { account: "34600000000@c.us", chatId: "34611111111@c.us", text: "  Exact message\n" };
+  for (const decision of ["deny", "approve"] as const) {
+    const pending = hook({ hook_event_name: "PreToolUse", session_id: "test", transcript_path: "/tmp/test", cwd: "/tmp", tool_name: "mcp__whatsapp_personal__whatsapp_send_text", tool_input: args, tool_use_id: decision }, decision, { signal: new AbortController().signal });
+    const approval = events.filter(({ type }) => type === "approval.required").at(-1)!;
+    expect(approval.data).toMatchObject({ server: "whatsapp_personal", tool: "whatsapp_send_text", toolArguments: args });
+    await adapter.respondToApproval(request.runId, String(approval.data!.approvalId), decision);
+    await expect(pending).resolves.toMatchObject({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: decision === "approve" ? "allow" : "deny" } });
+  }
+  expect(events.filter(({ type }) => type === "approval.required")).toHaveLength(2);
+  const cancellation = new AbortController();
+  const pending = hook({ hook_event_name: "PreToolUse", session_id: "test", transcript_path: "/tmp/test", cwd: "/tmp", tool_name: "mcp__whatsapp_personal__whatsapp_send_text", tool_input: args, tool_use_id: "cancel" }, "cancel", { signal: cancellation.signal });
+  cancellation.abort();
+  await expect(pending).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+  provider.completeTurn("completed");
+  await completion;
+});
+
 it("passes explicit yolo mode through Claude's dangerous permission gate", async () => {
   const provider = new FakeQueryDriver();
   const adapter = new ClaudeAdapter(

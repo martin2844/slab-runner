@@ -19,7 +19,11 @@ export class FakeAppServerConnection extends BaseAppServerConnection {
   requestHandler: (method: string, params: unknown) => Promise<unknown> = (
     method,
   ) => {
-    if (method === "thread/start" || method === "thread/resume") {
+    if (
+      method === "thread/start" ||
+      method === "thread/resume" ||
+      method === "thread/fork"
+    ) {
       return Promise.resolve({ thread: { id: "thread-1" } });
     }
     if (method === "turn/start") {

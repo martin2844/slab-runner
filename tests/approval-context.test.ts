@@ -17,4 +17,11 @@ describe("WhatsApp write approvals", () => {
     expect(requiresExactWriteContext("custom_mcp_personal", "whatsapp_send_text")).toBe(false);
     expect(requiresExactWriteContext("email", "email_send")).toBe(true);
   });
+  it("flags message redaction so hidden bytes cannot be approved as exact text", () => {
+    const result = writeApprovalContext("whatsapp_personal", "whatsapp_send_text", {
+      account: "34600000000@c.us", chatId: "34611111111@c.us", text: "https://example.com/invite?token=private-invite",
+    }, new Redactor());
+    expect(result.writeContextRedacted).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("private-invite");
+  });
 });

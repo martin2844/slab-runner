@@ -375,6 +375,53 @@ export class ClaudeAdapter implements RuntimeAdapter {
       allowedTools: this.allowedTools(run.request),
       canUseTool: (toolName, input, options) =>
         this.authorizeTool(run, toolName, input, options),
+      // allowedTools and bypassPermissions skip canUseTool. Native WhatsApp
+      // grants must still enforce their independent send approval ceiling.
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "^mcp__whatsapp_.*__whatsapp_send_text$",
+            timeout: 86460,
+            hooks: [
+              async (input, toolUseID, options) => {
+                if (input.hook_event_name !== "PreToolUse") return {};
+                let decision: PermissionResult;
+                try {
+                  if (!toolUseID) throw new Error("Missing tool identity");
+                  decision = await this.authorizeTool(
+                    run,
+                    input.tool_name,
+                    this.record(input.tool_input),
+                    {
+                      toolUseID,
+                      // Resolve to deny before the SDK hook timeout can fail open.
+                      signal: AbortSignal.any([
+                        options.signal,
+                        run.abortController.signal,
+                        AbortSignal.timeout(86400_000),
+                      ]),
+                    },
+                  );
+                } catch {
+                  decision = {
+                    behavior: "deny",
+                    message: "WhatsApp approval could not be verified.",
+                  };
+                }
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse",
+                    permissionDecision: decision.behavior,
+                    ...(decision.behavior === "deny"
+                      ? { permissionDecisionReason: decision.message }
+                      : {}),
+                  },
+                };
+              },
+            ],
+          },
+        ],
+      },
       includePartialMessages: true,
       abortController: run.abortController,
       env: this.runtimeEnvironment(lease),

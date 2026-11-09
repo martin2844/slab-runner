@@ -41,6 +41,7 @@ export interface McpServerDefinition {
     defaultMode: McpApprovalMode;
     tools: Record<string, McpApprovalMode>;
   };
+  docsRunApproval?: boolean;
 }
 
 export interface AgentExecutionRequest {
@@ -125,6 +126,7 @@ const mcpServerSchema = z
           .default({}),
       })
       .optional(),
+    docsRunApproval: z.boolean().optional(),
   })
   .superRefine((server, context) => {
     const parsedUrl = new URL(server.url);
@@ -156,6 +158,7 @@ const mcpServerSchema = z
       url: server.url,
       headers,
       ...(server.approval ? { approval: server.approval } : {}),
+      ...(server.docsRunApproval ? { docsRunApproval: true } : {}),
     };
   });
 

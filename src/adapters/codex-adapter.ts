@@ -1,4 +1,7 @@
-import { requiresExactWriteContext } from "../lib/approval-context.js";
+import {
+  requiresExactWriteContext,
+  writeApprovalContext,
+} from "../lib/approval-context.js";
 import { randomUUID } from "node:crypto";
 import type {
   AppServerConnection,
@@ -61,6 +64,7 @@ interface ActiveRun {
       server?: string;
       tool?: string;
       approvalArguments?: unknown;
+      writeContextRedacted?: boolean;
     }
   >;
   terminalToolIds: Set<string>;
@@ -203,12 +207,32 @@ export class CodexAdapter implements RuntimeAdapter {
         404,
       );
     }
+    if (this.#runByThread.has(threadId)) {
+      throw new RunnerError(
+        "INVALID_REQUEST",
+        "Runtime thread already has an active run",
+        409,
+      );
+    }
     try {
-      const result = await this.connection.request("thread/resume", {
+      // A loaded Codex thread/resume keeps its original MCP clients and ignores
+      // new configuration. Each run has fresh credentials, policies and trusted
+      // instructions. Fork the persisted history into a new runtime session so
+      // those overrides take effect while the product conversation continues.
+      const result = await this.connection.request("thread/fork", {
         threadId,
         ...this.threadParams(request),
       });
-      return this.rememberThreadModel(result, request.runtime.model);
+      const continuedThreadId = this.rememberThreadModel(
+        result,
+        request.runtime.model,
+      );
+      // Release the old subscription; Codex unloads it after its idle grace
+      // period. Failure here must not discard the successfully continued thread.
+      await this.connection
+        .request("thread/unsubscribe", { threadId })
+        .catch(() => {});
+      return continuedThreadId;
     } catch (error) {
       throw normalizeRuntimeError(error);
     }
@@ -793,10 +817,14 @@ export class CodexAdapter implements RuntimeAdapter {
       trackedStart.data = safeData;
       trackedStart.server = server;
       trackedStart.tool = tool;
-      trackedStart.approvalArguments =
-        requiresExactWriteContext(server, tool)
-          ? run.redactor.value(argumentsValue)
-          : undefined;
+      const context = writeApprovalContext(
+        server,
+        tool,
+        argumentsValue,
+        run.redactor,
+      );
+      trackedStart.approvalArguments = context.toolArguments;
+      trackedStart.writeContextRedacted = context.writeContextRedacted === true;
     }
     run.emit(
       lifecycle === "started"
@@ -1013,6 +1041,9 @@ export class CodexAdapter implements RuntimeAdapter {
               tool: pendingTool.tool,
               toolId: pendingTool.toolId,
               toolArguments: pendingTool.arguments,
+              ...(pendingTool.writeContextRedacted
+                ? { writeContextRedacted: true }
+                : {}),
             }
           : governedTool && governedTool.tool !== "unknown"
             ? { tool: governedTool.tool }
@@ -1024,7 +1055,12 @@ export class CodexAdapter implements RuntimeAdapter {
   private pendingToolApproval(
     run: ActiveRun,
     params: Record<string, unknown>,
-  ): { toolId: string; tool: string; arguments: unknown } | null {
+  ): {
+    toolId: string;
+    tool: string;
+    arguments: unknown;
+    writeContextRedacted?: boolean;
+  } | null {
     const server =
       typeof params.serverName === "string" ? params.serverName : null;
     const prompt = typeof params.message === "string" ? params.message : null;
@@ -1054,6 +1090,7 @@ export class CodexAdapter implements RuntimeAdapter {
       toolId,
       tool: started.tool ?? promptTool ?? "unknown",
       arguments: started.approvalArguments,
+      writeContextRedacted: started.writeContextRedacted === true,
     };
   }
 

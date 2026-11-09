@@ -23,7 +23,7 @@ defineRuntimeAdapterConformance("Codex", {
       if (method === "thread/start") {
         return Promise.resolve({ thread: { id: "conformance-thread" } });
       }
-      if (method === "thread/resume") {
+      if (method === "thread/fork") {
         const threadId = (params as { threadId?: unknown }).threadId;
         return Promise.resolve({ thread: { id: threadId } });
       }
@@ -205,7 +205,7 @@ defineRuntimeAdapterConformance("Codex", {
         threadOperations() {
           return connection.requests.flatMap(({ method }) => {
             if (method === "thread/start") return ["start" as const];
-            if (method === "thread/resume") return ["resume" as const];
+            if (method === "thread/fork") return ["resume" as const];
             return [];
           });
         },
@@ -214,8 +214,7 @@ defineRuntimeAdapterConformance("Codex", {
             ({ method }) => method === "thread/start",
           );
           const params = start?.params as
-            | { config?: { mcp_servers?: Record<string, unknown> } }
-            | undefined;
+            { config?: { mcp_servers?: Record<string, unknown> } } | undefined;
           return Object.keys(params?.config?.mcp_servers ?? {});
         },
         selectedModel() {

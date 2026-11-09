@@ -28,6 +28,7 @@ import {
 } from "node:fs";
 import { constants } from "node:fs";
 import { dirname } from "node:path";
+import { effectiveMcpToolMode } from "./mcp-policy.js";
 import type { ActivityLease, RuntimeActivityGate } from "./activity-gate.js";
 
 export type RunStatus =
@@ -49,6 +50,13 @@ interface ManagedRun {
   cancelRequested: boolean;
   pendingApprovalIds: Set<string>;
   activityLease: ActivityLease | null;
+  docsApproval?: {
+    leader: string;
+    pending: Set<string>;
+    decision?: "approve" | "deny";
+    resolving?: Promise<void>;
+  };
+  approvalFailure?: Error;
 }
 
 interface RuntimeHealthProbe {
@@ -233,9 +241,8 @@ export class RunManager {
       );
     }
     this.requireAdapter(request.runtime.type);
-    const activityLease = this.runtimeActivityGates
-      .get(request.runtime.type)
-      ?.beginRun() ?? null;
+    const activityLease =
+      this.runtimeActivityGates.get(request.runtime.type)?.beginRun() ?? null;
     try {
       if (!this.#restartableRunIds.delete(request.runId)) {
         this.recordRunIdentity(request.runId);
@@ -363,12 +370,88 @@ export class RunManager {
         410,
       );
     }
+    const docs = run.docsApproval;
+    if (docs?.leader === approvalId) {
+      if (docs.decision && docs.decision !== decision)
+        throw new RunnerError(
+          "APPROVAL_FAILED",
+          "Docs permission was already decided for this run",
+          409,
+        );
+      docs.decision = decision;
+      await this.resolveDocsApprovals(run);
+      return { runId, approvalId, decision };
+    }
+    if (docs?.pending.has(approvalId))
+      throw new RunnerError(
+        "APPROVAL_FAILED",
+        "Resolve the run's Docs permission request",
+        409,
+      );
     await this.requireAdapter(request.runtime.type).respondToApproval(
       runId,
       approvalId,
       decision,
     );
     return { runId, approvalId, decision };
+  }
+
+  private isDocsRunApproval(run: ManagedRun, data: Record<string, unknown>) {
+    const request = run.request;
+    const server = request?.mcpServers.find(
+      (server) => server.name === "docs" && server.docsRunApproval,
+    );
+    return (
+      !!request &&
+      !!server &&
+      data.server === "docs" &&
+      typeof data.tool === "string" &&
+      ["create_doc", "update_doc", "archive_doc"].includes(data.tool) &&
+      effectiveMcpToolMode(server, data.tool, request.agent.fullAccess) ===
+        "prompt"
+    );
+  }
+
+  private resolveDocsApprovals(run: ManagedRun): Promise<void> {
+    const docs = run.docsApproval;
+    if (!docs?.decision || !run.request) return Promise.resolve();
+    if (docs.resolving) return docs.resolving;
+    const adapter = this.requireAdapter(run.request.runtime.type);
+    const decision = docs.decision;
+    docs.resolving = (async () => {
+      for (const id of docs.pending) {
+        if (run.cancelRequested || TERMINAL_STATUSES.has(run.status)) break;
+        try {
+          await adapter.respondToApproval(run.runId, id, decision);
+          docs.pending.delete(id);
+        } catch (error) {
+          // An adapter may cancel a pending request while the owner is deciding.
+          if (!docs.pending.has(id)) continue;
+          run.approvalFailure =
+            error instanceof Error ? error : new Error("Docs approval failed");
+          await adapter.cancelRun(run.runId);
+          throw run.approvalFailure;
+        }
+      }
+    })().then(
+      () => {
+        delete docs.resolving;
+        // A follow-up tool can arrive in the microtask between draining the
+        // pending set and releasing this promise. Resolve it under the same grant.
+        if (
+          docs.pending.size &&
+          !run.approvalFailure &&
+          !run.cancelRequested &&
+          !TERMINAL_STATUSES.has(run.status)
+        )
+          return this.resolveDocsApprovals(run);
+      },
+      (error: unknown) => {
+        delete docs.resolving;
+        throw error;
+      },
+    );
+    return docs.resolving;
   }
 
   private async execute(run: ManagedRun): Promise<void> {
@@ -393,8 +476,16 @@ export class RunManager {
       const runtimeThreadId = isNewThread
         ? await adapter.startThread(request)
         : await adapter.resumeThread(request);
-      if (isNewThread) {
-        this.emit(run, "thread.created", { runtimeThreadId });
+      if (isNewThread || runtimeThreadId !== request.thread.runtimeThreadId) {
+        this.emit(run, "thread.created", {
+          runtimeThreadId,
+          ...(isNewThread
+            ? {}
+            : {
+                previousRuntimeThreadId: request.thread.runtimeThreadId,
+                continuity: "resumed",
+              }),
+        });
       }
       if (run.cancelRequested) {
         run.status = "cancelled";
@@ -421,11 +512,31 @@ export class RunManager {
         ) {
           run.pendingApprovalIds.add(data.approvalId);
           run.status = "waiting_approval";
+          if (this.isDocsRunApproval(run, data)) {
+            const first = !run.docsApproval;
+            run.docsApproval ??= {
+              leader: data.approvalId,
+              pending: new Set(),
+            };
+            run.docsApproval.pending.add(data.approvalId);
+            if (run.docsApproval.decision) {
+              void this.resolveDocsApprovals(run).catch((error) =>
+                this.logger.error("Docs approval resolution failed", {
+                  runId: run.runId,
+                  error: String(error),
+                }),
+              );
+              return;
+            }
+            if (!first) return;
+            data = { ...data, approvalScope: "docs_run" };
+          }
         } else if (
           type === "approval.resolved" &&
           typeof data.approvalId === "string"
         ) {
           run.pendingApprovalIds.delete(data.approvalId);
+          run.docsApproval?.pending.delete(data.approvalId);
           if (
             run.pendingApprovalIds.size === 0 &&
             run.status === "waiting_approval"
@@ -440,6 +551,7 @@ export class RunManager {
       } finally {
         adapterEventsOpen = false;
       }
+      if (run.approvalFailure) throw run.approvalFailure;
       if (adapterProtocolViolation) {
         throw new RunnerError(
           "UNKNOWN_RUNTIME_ERROR",
@@ -643,12 +755,11 @@ export class RunManager {
       controller,
       promise: Promise.resolve().then(() => adapter.health(controller.signal)),
     };
-    probe.promise = probe.promise
-      .finally(() => {
-        if (this.#healthChecks.get(runtimeId) === probe) {
-          this.#healthChecks.delete(runtimeId);
-        }
-      });
+    probe.promise = probe.promise.finally(() => {
+      if (this.#healthChecks.get(runtimeId) === probe) {
+        this.#healthChecks.delete(runtimeId);
+      }
+    });
     this.#healthChecks.set(runtimeId, probe);
     return probe;
   }

@@ -172,11 +172,67 @@ describe("CodexAdapter", () => {
     expect(JSON.stringify(call?.params)).not.toContain('"create_doc"');
   });
 
-  it("resumes the supplied runtime thread", async () => {
+  it("continues the supplied history with fresh per-run MCP credentials and policies", async () => {
+    const connection = new FakeAppServerConnection();
+    const sessions = new Map<string, unknown>();
+    connection.requestHandler = (method, params) => {
+      const input = params as { threadId?: string; config?: unknown };
+      if (method === "thread/start") {
+        sessions.set("original", input.config);
+        return Promise.resolve({ thread: { id: "original" } });
+      }
+      if (method === "thread/resume") {
+        // Codex 0.148 rejoins loaded threads without refreshing their MCP clients.
+        return Promise.resolve({ thread: { id: input.threadId } });
+      }
+      if (method === "thread/fork") {
+        expect(sessions.has(input.threadId!)).toBe(true);
+        sessions.set("continued", input.config);
+        return Promise.resolve({ thread: { id: "continued" } });
+      }
+      return Promise.resolve({});
+    };
+    const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
+    const first = executionRequest();
+    const oldThread = await adapter.startThread(first);
+    const second = executionRequest({ thread: { runtimeThreadId: oldThread } });
+    second.mcpServers = [
+      {
+        ...first.mcpServers[0]!,
+        name: "whatsapp_whatsapp",
+        url: "http://127.0.0.1/mcp?run=second",
+        headers: { Authorization: "Bearer second-run-only" },
+        approval: {
+          defaultMode: "prompt",
+          tools: { whatsapp_send_text: "approve" },
+        },
+      },
+    ];
+    const continued = await adapter.resumeThread(second);
+    expect(continued).not.toBe(oldThread);
+    expect(sessions.get(continued)).toMatchObject({
+      mcp_servers: {
+        whatsapp_whatsapp: {
+          url: "http://127.0.0.1/mcp?run=second",
+          http_headers: { Authorization: "Bearer second-run-only" },
+        },
+      },
+    });
+    expect(JSON.stringify(sessions.get(continued))).not.toContain(
+      "work-secret",
+    );
+    expect(JSON.stringify(sessions.get(oldThread))).toContain("work-secret");
+    expect(connection.requests.at(-1)).toEqual({
+      method: "thread/unsubscribe",
+      params: { threadId: oldThread },
+    });
+  });
+
+  it("forks the supplied runtime thread", async () => {
     const connection = new FakeAppServerConnection();
     connection.requestHandler = (method) =>
       Promise.resolve(
-        method === "thread/resume" ? { thread: { id: "existing-thread" } } : {},
+        method === "thread/fork" ? { thread: { id: "existing-thread" } } : {},
       );
     const adapter = new CodexAdapter(connection, "/tmp/safe-runner-cwd");
 
@@ -186,7 +242,7 @@ describe("CodexAdapter", () => {
       ),
     ).resolves.toBe("existing-thread");
     expect(connection.requests[0]).toMatchObject({
-      method: "thread/resume",
+      method: "thread/fork",
       params: { threadId: "existing-thread" },
     });
     expect(connection.requests[0]?.params).not.toHaveProperty("excludeTurns");
@@ -1584,65 +1640,85 @@ describe("CodexAdapter", () => {
     await completion;
   });
 
-  it("presents exact WhatsApp sending arguments from the correlated Codex tool", async () => {
-    const request = executionRequest({
-      mcpServers: [
-        {
-          name: "whatsapp_personal",
-          url: "http://127.0.0.1:6969/mcp",
-          headers: {},
-          approval: {
-            defaultMode: "deny",
-            tools: { whatsapp_send_text: "prompt" },
+  it.each([false, true])(
+    "presents correlated WhatsApp context and flags hidden message bytes (redacted=%s)",
+    async (redacted) => {
+      const text = redacted
+        ? "https://example.com/invite?token=private-invite"
+        : "Hello";
+      const displayed = redacted
+        ? "https://example.com/invite?token=[REDACTED]"
+        : text;
+      const request = executionRequest({
+        mcpServers: [
+          {
+            name: "whatsapp_personal",
+            url: "http://127.0.0.1:6969/mcp",
+            headers: {},
+            approval: {
+              defaultMode: "deny",
+              tools: { whatsapp_send_text: "prompt" },
+            },
+          },
+        ],
+      });
+      const { connection, events, completion } = await activeTurn(request);
+      connection.serverNotification({
+        method: "item/started",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "status-call-1",
+            type: "mcpToolCall",
+            server: "whatsapp_personal",
+            tool: "whatsapp_send_text",
+            arguments: {
+              account: "34600000000@c.us",
+              chatId: "34611111111@c.us",
+              text,
+            },
           },
         },
-      ],
-    });
-    const { connection, events, completion } = await activeTurn(request);
-    connection.serverNotification({
-      method: "item/started",
-      params: {
-        threadId: "thread-1",
-        turnId: "turn-1",
-        item: {
-          id: "status-call-1",
-          type: "mcpToolCall",
+      });
+      connection.serverRequest({
+        id: 151,
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "status-call-1",
+          serverName: "whatsapp_personal",
+          message: "Permit this WhatsApp action?",
+        },
+      });
+
+      expect(connection.responses).toEqual([]);
+      expect(events.at(-1)).toMatchObject({
+        type: "approval.required",
+        data: {
+          kind: "mcp_elicitation",
           server: "whatsapp_personal",
           tool: "whatsapp_send_text",
-          arguments: { account: "34600000000@c.us", chatId: "34611111111@c.us", text: "Hello" },
+          toolId: "status-call-1",
+          toolArguments: {
+            account: "34600000000@c.us",
+            chatId: "34611111111@c.us",
+            text: displayed,
+          },
         },
-      },
-    });
-    connection.serverRequest({
-      id: 151,
-      method: "mcpServer/elicitation/request",
-      params: {
-        threadId: "thread-1",
-        turnId: "turn-1",
-        itemId: "status-call-1",
-        serverName: "whatsapp_personal",
-        message: "Permit this WhatsApp action?",
-      },
-    });
+      });
 
-    expect(connection.responses).toEqual([]);
-    expect(events.at(-1)).toMatchObject({
-      type: "approval.required",
-      data: {
-        kind: "mcp_elicitation",
-        server: "whatsapp_personal",
-        tool: "whatsapp_send_text",
-        toolId: "status-call-1",
-        toolArguments: { account: "34600000000@c.us", chatId: "34611111111@c.us", text: "Hello" },
-      },
-    });
+      expect(events.at(-1)?.data?.writeContextRedacted === true).toBe(redacted);
+      expect(JSON.stringify(events)).not.toContain("private-invite");
 
-    connection.serverNotification({
-      method: "turn/completed",
-      params: { threadId: "thread-1", turn: { status: "completed" } },
-    });
-    await completion;
-  });
+      connection.serverNotification({
+        method: "turn/completed",
+        params: { threadId: "thread-1", turn: { status: "completed" } },
+      });
+      await completion;
+    },
+  );
 
   it("declines conflicting structured and prose MCP tool identities", async () => {
     const request = executionRequest({
