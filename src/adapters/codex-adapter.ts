@@ -479,17 +479,33 @@ export class CodexAdapter implements RuntimeAdapter {
   private threadParams(
     request: AgentExecutionRequest,
   ): Record<string, unknown> {
-    const runtimePermissions = this.runtimePermissions(
-      request.agent.permissionMode,
-    );
+    const workspace = this.resolvedWorkspace(request);
+    // In the code profile the container is the sandbox: Codex runs commands in
+    // the workspace checkout without per-command approval. MCP approval
+    // policies are unchanged.
+    const runtimePermissions = workspace
+      ? ({ approvalPolicy: "never", sandbox: "danger-full-access" } as const)
+      : this.runtimePermissions(request.agent.permissionMode);
     return {
       ...(request.runtime.model ? { model: request.runtime.model } : {}),
-      cwd: request.cwd ?? this.safeCwd,
+      cwd: workspace?.repoPath ?? request.cwd ?? this.safeCwd,
       approvalPolicy: runtimePermissions.approvalPolicy,
       sandbox: runtimePermissions.sandbox,
       serviceName: "slab_runner",
       developerInstructions: this.buildDeveloperInstructions(request),
       config: this.mcpConfig(request.mcpServers, request.agent.fullAccess),
+    };
+  }
+
+  private resolvedWorkspace(request: AgentExecutionRequest) {
+    const workspace = request.workspace;
+    if (!workspace?.repoPath || !workspace.handoffPath || !workspace.branch) {
+      return null;
+    }
+    return {
+      repoPath: workspace.repoPath,
+      handoffPath: workspace.handoffPath,
+      branch: workspace.branch,
     };
   }
 
@@ -549,14 +565,31 @@ export class CodexAdapter implements RuntimeAdapter {
   }
 
   private buildDeveloperInstructions(request: AgentExecutionRequest): string {
-    return [
+    const sections = [
       `You are the Slab agent named ${request.agent.name}.`,
       `Agent identifier: ${request.agent.id}`,
       `Role: ${request.agent.role}`,
       "Follow these agent instructions:",
       request.agent.instructions,
       "Use only the capabilities exposed by this runtime and its allowed MCP servers.",
-    ].join("\n\n");
+    ];
+    const workspace = this.resolvedWorkspace(request);
+    if (workspace) {
+      sections.push(
+        [
+          "Workspace:",
+          `- Repository checkout (your working directory): ${workspace.repoPath}`,
+          `- Handoff directory (stage files such as spec.md or plan.md; never committed): ${workspace.handoffPath}`,
+          `- Git branch: ${workspace.branch}`,
+          "- The checkout has no git remote. Never push and never add a remote; Slab publishes the branch after review.",
+          "- You may commit locally on this branch. Do not switch to other branches.",
+          "- Never create, edit, or delete files under .github/workflows/ or .gitmodules, not even in an intermediate commit (every commit is checked before publishing).",
+          "- Processes still running in the workspace are stopped when the run ends.",
+          "- Commands run without per-command approval inside an isolated container.",
+        ].join("\n"),
+      );
+    }
+    return sections.join("\n\n");
   }
 
   private buildTurnMessage(request: AgentExecutionRequest): string {

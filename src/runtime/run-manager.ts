@@ -7,10 +7,11 @@ import {
   type RuntimeSummary,
 } from "./adapter.js";
 import { normalizeRuntimeError, publicError, RunnerError } from "./errors.js";
-import type {
-  AgentExecutionRequest,
-  NormalizedEventType,
-  RunnerEvent,
+import {
+  DEFAULT_WALL_CLOCK_SECONDS,
+  type AgentExecutionRequest,
+  type NormalizedEventType,
+  type RunnerEvent,
 } from "./protocol.js";
 import type { Logger } from "../lib/logger.js";
 import {
@@ -39,6 +40,29 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 
+export interface RunWorkspaceLease {
+  workspace: { id: string; repoPath: string; handoffPath: string; branch: string };
+  release(): void;
+}
+
+/** Resolves and locks a code-profile workspace for the duration of a run. */
+export interface RunWorkspaceProvider {
+  acquireForRun(
+    workspaceId: string,
+    runId: string,
+    cancel: () => Promise<unknown>,
+  ): RunWorkspaceLease;
+}
+
+export interface RunManagerOptions {
+  /** Concurrent active runs; `null`/unset means unlimited. */
+  maxActiveRuns?: number | null;
+  /** Present only in the code profile. */
+  workspaces?: RunWorkspaceProvider | null;
+  /** After a wall-clock cancel, how long to wait before forcing the terminal event. */
+  timeLimitGraceMs?: number;
+}
+
 interface ManagedRun {
   runId: string;
   request: AgentExecutionRequest | null;
@@ -50,6 +74,10 @@ interface ManagedRun {
   cancelRequested: boolean;
   pendingApprovalIds: Set<string>;
   activityLease: ActivityLease | null;
+  workspaceLease?: RunWorkspaceLease | null;
+  wallClockTimer?: NodeJS.Timeout | null;
+  forceTerminalTimer?: NodeJS.Timeout | null;
+  timeLimitExceeded?: boolean;
   docsApproval?: {
     leader: string;
     pending: Set<string>;
@@ -99,6 +127,9 @@ export class RunManager {
     string,
     RuntimeActivityGate
   >;
+  private readonly maxActiveRuns: number | null;
+  private readonly workspaces: RunWorkspaceProvider | null;
+  private readonly timeLimitGraceMs: number;
 
   constructor(
     adapters: ReadonlyMap<string, RuntimeAdapter>,
@@ -107,7 +138,11 @@ export class RunManager {
     private readonly journalFile?: string,
     private readonly healthTimeoutMs = 5_000,
     runtimeActivityGates: ReadonlyMap<string, RuntimeActivityGate> = new Map(),
+    options: RunManagerOptions = {},
   ) {
+    this.maxActiveRuns = options.maxActiveRuns ?? null;
+    this.workspaces = options.workspaces ?? null;
+    this.timeLimitGraceMs = options.timeLimitGraceMs ?? 30_000;
     for (const [runtimeId, adapter] of adapters) {
       if (runtimeId !== adapter.definition.id) {
         throw new Error(
@@ -240,16 +275,45 @@ export class RunManager {
         410,
       );
     }
+    if (request.workspace) this.validateWorkspaceRequest(request);
+    else if (this.workspaces) {
+      // In the code profile every run must hold a workspace lock; a plain
+      // `cwd` run could otherwise touch a workspace that a publish is using.
+      throw new RunnerError(
+        "WORKSPACE_REQUIRED",
+        "Runs on the code profile must specify a workspace",
+        400,
+      );
+    }
     this.requireAdapter(request.runtime.type);
-    const activityLease =
-      this.runtimeActivityGates.get(request.runtime.type)?.beginRun() ?? null;
+    if (
+      this.maxActiveRuns !== null &&
+      this.activeRunCount() >= this.maxActiveRuns
+    ) {
+      throw new RunnerError(
+        "RUNNER_AT_CAPACITY",
+        "The runner is at its concurrent run limit; retry later",
+        429,
+      );
+    }
+    const workspaceLease =
+      request.workspace && this.workspaces
+        ? this.workspaces.acquireForRun(request.workspace.id, request.runId, () =>
+            this.cancel(request.runId),
+          )
+        : null;
+    let activityLease: ActivityLease | null = null;
     try {
+      activityLease =
+        this.runtimeActivityGates.get(request.runtime.type)?.beginRun() ?? null;
       if (!this.#restartableRunIds.delete(request.runId)) {
         this.recordRunIdentity(request.runId);
       }
       const run: ManagedRun = {
         runId: request.runId,
-        request,
+        request: workspaceLease
+          ? { ...request, workspace: workspaceLease.workspace }
+          : request,
         status: "running",
         nextEventId: 1,
         events: [],
@@ -258,14 +322,122 @@ export class RunManager {
         cancelRequested: false,
         pendingApprovalIds: new Set(),
         activityLease,
+        workspaceLease,
       };
       this.#runs.set(request.runId, run);
+      const wallClockSeconds =
+        request.limits?.wallClockSeconds ??
+        (request.workspace ? DEFAULT_WALL_CLOCK_SECONDS : null);
+      if (wallClockSeconds) {
+        run.wallClockTimer = setTimeout(
+          () => void this.expire(run, wallClockSeconds),
+          wallClockSeconds * 1_000,
+        );
+        run.wallClockTimer.unref();
+      }
       void this.execute(run);
       return { runId: request.runId, status: "running" };
     } catch (error) {
       activityLease?.release();
+      workspaceLease?.release();
       throw error;
     }
+  }
+
+  private validateWorkspaceRequest(request: AgentExecutionRequest): void {
+    if (!this.workspaces) {
+      throw new RunnerError(
+        "PROFILE_NOT_ENABLED",
+        "Workspace runs require RUNNER_PROFILE=code",
+        400,
+      );
+    }
+    if (request.cwd !== null) {
+      throw new RunnerError(
+        "INVALID_REQUEST",
+        "cwd must be null when a workspace is supplied",
+        400,
+      );
+    }
+    if (request.runtime.type !== "codex") {
+      throw new RunnerError(
+        "RUNTIME_UNSUPPORTED_FOR_PROFILE",
+        "Only the codex runtime supports workspace runs",
+        400,
+      );
+    }
+  }
+
+  private activeRunCount(): number {
+    let count = 0;
+    for (const run of this.#runs.values()) {
+      if (run.request && !TERMINAL_STATUSES.has(run.status)) count++;
+    }
+    return count;
+  }
+
+  private async expire(run: ManagedRun, seconds: number): Promise<void> {
+    if (TERMINAL_STATUSES.has(run.status)) return;
+    run.timeLimitExceeded = true;
+    this.logger.warn("run wall-clock limit reached", {
+      runId: run.runId,
+      wallClockSeconds: seconds,
+    });
+    run.forceTerminalTimer = setTimeout(() => {
+      if (TERMINAL_STATUSES.has(run.status)) return;
+      this.finishCancelled(run);
+      this.releaseResources(run);
+      this.scheduleCleanup(run);
+    }, this.timeLimitGraceMs);
+    run.forceTerminalTimer.unref();
+    try {
+      await this.cancel(run.runId);
+    } catch {
+      this.logger.error("wall-clock cancellation failed", { runId: run.runId });
+    }
+  }
+
+  private hasTerminalEvent(run: ManagedRun): boolean {
+    return run.events.some((event) => TERMINAL_TYPES.has(event.type));
+  }
+
+  /** Emits the terminal event for a cancelled run (or a time-limited one). */
+  private finishCancelled(run: ManagedRun, error?: RunnerError): void {
+    if (this.hasTerminalEvent(run)) return;
+    if (run.timeLimitExceeded) {
+      run.status = "failed";
+      this.emit(run, "run.failed", {
+        error: publicError(
+          new RunnerError(
+            "RUN_TIME_LIMIT",
+            "Run exceeded its wall-clock time limit",
+            408,
+          ),
+        ),
+      });
+      this.logger.error("run failed", { runId: run.runId, code: "RUN_TIME_LIMIT" });
+      return;
+    }
+    run.status = "cancelled";
+    this.emit(run, "run.cancelled", {
+      error: publicError(
+        error ?? new RunnerError("RUN_CANCELLED", "Run was cancelled", 409),
+      ),
+    });
+    this.logger.info("run cancelled", { runId: run.runId });
+  }
+
+  private releaseResources(run: ManagedRun): void {
+    if (run.wallClockTimer) clearTimeout(run.wallClockTimer);
+    run.wallClockTimer = null;
+    if (TERMINAL_STATUSES.has(run.status) && run.forceTerminalTimer) {
+      clearTimeout(run.forceTerminalTimer);
+      run.forceTerminalTimer = null;
+    }
+    run.activityLease?.release();
+    run.activityLease = null;
+    run.workspaceLease?.release();
+    run.workspaceLease = null;
   }
 
   has(runId: string): boolean {
@@ -488,13 +660,7 @@ export class RunManager {
         });
       }
       if (run.cancelRequested) {
-        run.status = "cancelled";
-        this.emit(run, "run.cancelled", {
-          error: publicError(
-            new RunnerError("RUN_CANCELLED", "Run was cancelled", 409),
-          ),
-        });
-        this.logger.info("run cancelled", { runId: request.runId });
+        this.finishCancelled(run);
         return;
       }
       let adapterProtocolViolation = false;
@@ -560,27 +726,20 @@ export class RunManager {
         );
       }
       if (run.cancelRequested) {
-        run.status = "cancelled";
-        this.emit(run, "run.cancelled", {
-          error: publicError(
-            new RunnerError("RUN_CANCELLED", "Run was cancelled", 409),
-          ),
-        });
-        this.logger.info("run cancelled", { runId: request.runId });
+        this.finishCancelled(run);
         return;
       }
+      if (this.hasTerminalEvent(run)) return;
       run.status = "completed";
       this.emit(run, "run.completed", { runtimeThreadId });
       this.logger.info("run completed", { runId: request.runId });
     } catch (error) {
       const normalized =
         error instanceof RunnerError ? error : normalizeRuntimeError(error);
-      if (normalized.code === "RUN_CANCELLED") {
-        run.status = "cancelled";
-        this.emit(run, "run.cancelled", {
-          error: publicError(normalized),
-        });
-        this.logger.info("run cancelled", { runId: request.runId });
+      if (this.hasTerminalEvent(run)) {
+        // A forced wall-clock termination already ended this run.
+      } else if (normalized.code === "RUN_CANCELLED" || run.timeLimitExceeded) {
+        this.finishCancelled(run, normalized);
       } else {
         run.status = "failed";
         this.emit(run, "run.failed", { error: publicError(normalized) });
@@ -590,8 +749,7 @@ export class RunManager {
         });
       }
     } finally {
-      run.activityLease?.release();
-      run.activityLease = null;
+      this.releaseResources(run);
       this.scheduleCleanup(run);
     }
   }

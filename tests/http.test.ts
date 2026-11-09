@@ -137,7 +137,7 @@ async function testApp(
 describe("Runner HTTP API", () => {
   it("reports health and runtime availability", async () => {
     const { server } = await testApp();
-    await request(server).get("/health").expect(200, { status: "ok" });
+    await request(server).get("/health").expect(200, { status: "ok", profile: "agent" });
     const response = await request(server).get("/runtimes").expect(200);
     expect(response.body).toEqual({
       data: [

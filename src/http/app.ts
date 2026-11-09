@@ -13,6 +13,20 @@ import {
   type RunnerEvent,
 } from "../runtime/protocol.js";
 import type { RunManager } from "../runtime/run-manager.js";
+import type { RunnerProfile } from "../config.js";
+import {
+  createWorkspaceSchema,
+  handoffWriteSchema,
+  publishSchema,
+} from "../workspaces/types.js";
+import type { WorkspaceManager } from "../workspaces/workspace-manager.js";
+
+const HANDOFF_ROUTE = /^\/workspaces\/[^/]+\/handoff\/[^/]+$/;
+
+function param(request: Request, name: string): string {
+  const value = request.params[name];
+  return typeof value === "string" ? value : "";
+}
 
 function isAuthorized(request: Request, expectedToken: string): boolean {
   const authorization = request.header("authorization");
@@ -38,13 +52,25 @@ export function createHttpApp(options: {
   runManager: RunManager;
   codexAuth?: CodexAuthManager;
   runnerToken?: string;
+  profile?: RunnerProfile;
+  /** Required for, and only used by, the code profile. */
+  workspaces?: WorkspaceManager;
 }) {
+  const profile = options.profile ?? "agent";
+  const workspaces = profile === "code" ? options.workspaces : undefined;
   const app = express();
   app.disable("x-powered-by");
-  app.use(express.json({ limit: "1mb" }));
+  const defaultJson = express.json({ limit: "1mb" });
+  // Handoff files may be up to 2 MB of UTF-8; leave room for JSON escaping.
+  const handoffJson = express.json({ limit: "8mb" });
+  app.use((request, response, next) => {
+    if (workspaces && request.method === "PUT" && HANDOFF_ROUTE.test(request.path))
+      handoffJson(request, response, next);
+    else defaultJson(request, response, next);
+  });
 
   app.get("/health", (_request, response) => {
-    response.json({ status: "ok" });
+    response.json({ status: "ok", profile });
   });
 
   if (options.runnerToken) {
@@ -112,6 +138,103 @@ export function createHttpApp(options: {
       } catch (error) {
         next(error);
       }
+    });
+  }
+
+  if (workspaces) {
+    app.post("/workspaces", (request, response, next) => {
+      try {
+        const result = workspaces.create(
+          createWorkspaceSchema.parse(request.body),
+        );
+        response.status(result.created ? 202 : 200).json({ data: result.workspace });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/workspaces", (_request, response) => {
+      response.json({ data: workspaces.list() });
+    });
+
+    app.get("/workspaces/:id", (request, response, next) => {
+      try {
+        response.json({ data: workspaces.get(param(request, "id")) });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.delete("/workspaces/:id", async (request, response, next) => {
+      try {
+        response.json({ data: await workspaces.delete(param(request, "id")) });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/workspaces/:id/handoff", (request, response, next) => {
+      try {
+        response.json({ data: workspaces.listHandoff(param(request, "id")) });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/workspaces/:id/handoff/:name", (request, response, next) => {
+      try {
+        response.json({
+          data: workspaces.readHandoff(
+            param(request, "id"),
+            param(request, "name"),
+          ),
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.put("/workspaces/:id/handoff/:name", (request, response, next) => {
+      try {
+        const { content } = handoffWriteSchema.parse(request.body);
+        response.json({
+          data: workspaces.writeHandoff(
+            param(request, "id"),
+            param(request, "name"),
+            content,
+          ),
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get("/workspaces/:id/diff", async (request, response, next) => {
+      try {
+        response.json({ data: await workspaces.diff(param(request, "id")) });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post("/workspaces/:id/publish", async (request, response, next) => {
+      try {
+        const input = publishSchema.parse(request.body);
+        response.json({
+          data: await workspaces.publish(param(request, "id"), input),
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+  } else {
+    app.use("/workspaces", (_request, response) => {
+      response.status(404).json({
+        error: {
+          code: "PROFILE_NOT_ENABLED",
+          message: "Workspaces require RUNNER_PROFILE=code",
+        },
+      });
     });
   }
 
@@ -274,6 +397,18 @@ export function createHttpApp(options: {
       });
       return;
     }
+    if (
+      error instanceof Error &&
+      (error as { type?: unknown }).type === "entity.too.large"
+    ) {
+      response.status(413).json({
+        error: {
+          code: "INVALID_REQUEST",
+          message: "Request body is too large",
+        },
+      });
+      return;
+    }
     if (error instanceof SyntaxError && "body" in error) {
       response.status(400).json({
         error: {
@@ -291,9 +426,14 @@ export function createHttpApp(options: {
             "The request could not be completed",
             500,
           );
-    response
-      .status(normalized.httpStatus)
-      .json({ error: publicError(normalized) });
+    response.status(normalized.httpStatus).json({
+      error: {
+        ...publicError(normalized),
+        ...(normalized.details !== undefined
+          ? { details: normalized.details }
+          : {}),
+      },
+    });
   };
   app.use(errorHandler);
   return app;

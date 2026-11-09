@@ -89,7 +89,28 @@ export interface AgentExecutionRequest {
   context: Array<{ role: "user" | "assistant"; body: string }>;
   mcpServers: McpServerDefinition[];
   cwd: string | null;
+  /**
+   * Code profile only. The control plane sends `{ id }`; the run manager
+   * resolves the paths and branch after taking the workspace lock.
+   */
+  workspace?: RunWorkspace | null;
+  limits?: RunLimits | null;
 }
+
+export interface RunWorkspace {
+  id: string;
+  repoPath?: string;
+  handoffPath?: string;
+  branch?: string;
+}
+
+export interface RunLimits {
+  wallClockSeconds: number;
+}
+
+export const DEFAULT_WALL_CLOCK_SECONDS = 3_600;
+export const MAX_WALL_CLOCK_SECONDS = 14_400;
+export const WORKSPACE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,80}$/;
 
 const headerSchema = z.record(
   z.string().min(1).max(128),
@@ -258,6 +279,22 @@ const canonicalRequestSchema = z.object({
     .max(4_096)
     .refine(isAbsolute, "cwd must be an absolute path")
     .nullable(),
+  workspace: z
+    .object({ id: z.string().regex(WORKSPACE_ID_PATTERN) })
+    .strict()
+    .nullable()
+    .default(null),
+  limits: z
+    .object({
+      wallClockSeconds: z
+        .number()
+        .int()
+        .min(1)
+        .max(MAX_WALL_CLOCK_SECONDS)
+        .default(DEFAULT_WALL_CLOCK_SECONDS),
+    })
+    .nullable()
+    .default(null),
 });
 
 function normalizeMcpServers(value: unknown): unknown[] {
@@ -327,11 +364,22 @@ function normalizeExecutionRequest(input: unknown): unknown {
     context: raw.context ?? [],
     mcpServers: normalizeMcpServers(raw.mcpServers ?? raw.mcp_servers),
     cwd: raw.cwd ?? null,
+    workspace: raw.workspace ?? null,
+    limits: raw.limits ?? null,
   };
 }
 
 export function parseExecutionRequest(input: unknown): AgentExecutionRequest {
-  return canonicalRequestSchema.parse(normalizeExecutionRequest(input));
+  const { workspace, limits, ...request } = canonicalRequestSchema.parse(
+    normalizeExecutionRequest(input),
+  );
+  // Omit the code-profile fields when absent so agent-profile requests keep
+  // their exact historical shape.
+  return {
+    ...request,
+    ...(workspace ? { workspace } : {}),
+    ...(limits ? { limits } : {}),
+  };
 }
 
 export const approvalDecisionSchema = z.object({

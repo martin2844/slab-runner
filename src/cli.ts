@@ -15,6 +15,7 @@ import { JsonLogger } from "./lib/logger.js";
 import { Redactor } from "./lib/redactor.js";
 import { RuntimeActivityGate } from "./runtime/activity-gate.js";
 import { RunManager } from "./runtime/run-manager.js";
+import { WorkspaceManager } from "./workspaces/workspace-manager.js";
 
 async function listen(
   server: Server,
@@ -67,6 +68,15 @@ async function main(): Promise<void> {
       });
     }
   }
+  const workspaces =
+    config.profile === "code"
+      ? new WorkspaceManager({
+          root: config.codeRoot,
+          allowFileRemotes: config.gitAllowFileRemotes,
+          redactor,
+          logger,
+        })
+      : undefined;
   const codexActivityGate = new RuntimeActivityGate();
   const runManager = new RunManager(
     new Map(adapters.map((adapter) => [adapter.definition.id, adapter])),
@@ -75,16 +85,27 @@ async function main(): Promise<void> {
     config.runJournalFile,
     undefined,
     new Map([["codex", codexActivityGate]]),
+    {
+      maxActiveRuns: config.maxActiveRuns,
+      ...(workspaces ? { workspaces } : {}),
+    },
   );
   const codexAuth = new CodexAuthManager(connection, codexActivityGate);
   const app = createHttpApp({
     runManager,
     codexAuth,
     ...(config.runnerToken ? { runnerToken: config.runnerToken } : {}),
+    profile: config.profile,
+    ...(workspaces ? { workspaces } : {}),
   });
   const server = createServer(app);
   await listen(server, config.port, config.host);
-  logger.info("runner startup", { host: config.host, port: config.port });
+  logger.info("runner startup", {
+    host: config.host,
+    port: config.port,
+    profile: config.profile,
+    maxActiveRuns: config.maxActiveRuns,
+  });
 
   let shuttingDown = false;
   const shutdown = async () => {

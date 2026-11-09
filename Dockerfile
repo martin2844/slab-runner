@@ -10,6 +10,69 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
+# Code profile: a full toolchain image where Codex works on git checkouts.
+# Build with `docker build --target code .`. The container is the sandbox.
+# This stage sits before `runtime` so a plain `docker build .` still produces
+# the default runtime image.
+FROM node:22-bookworm AS code
+
+ARG CODEX_VERSION=0.148.0
+
+LABEL org.opencontainers.image.title="Slab Runner (code)" \
+      org.opencontainers.image.description="Runtime daemon for Slab coding runs" \
+      org.opencontainers.image.version="development" \
+      org.opencontainers.image.source="https://github.com/martin2844/slab-runner"
+
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    git \
+    jq \
+    procps \
+    python3 \
+    python3-pip \
+    python3-venv \
+    ripgrep \
+  && rm -rf /var/lib/apt/lists/* \
+  && npm install --global "@openai/codex@${CODEX_VERSION}" \
+  && npm cache clean --force \
+  && corepack enable \
+  && groupadd --system --gid 10001 slab-runner \
+  && useradd --system --uid 10001 --gid slab-runner --create-home slab-runner
+
+WORKDIR /app
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+
+RUN mkdir -p /var/lib/slab-runner/codex /var/lib/slab-code /tmp/slab-runner-workspace \
+  && chown -R slab-runner:slab-runner /var/lib/slab-runner /var/lib/slab-code /tmp/slab-runner-workspace
+
+# Package-manager caches live on the code volume next to the checkouts.
+ENV NODE_ENV=production \
+    RUNNER_HOST=127.0.0.1 \
+    RUNNER_PORT=6990 \
+    RUNNER_PROFILE=code \
+    RUNNER_CODE_ROOT=/var/lib/slab-code \
+    RUNNER_CODEX_HOME=/var/lib/slab-runner/codex \
+    CODEX_BIN=/usr/local/bin/codex \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    COREPACK_HOME=/var/lib/slab-code/cache/corepack \
+    npm_config_cache=/var/lib/slab-code/cache/npm \
+    XDG_CACHE_HOME=/var/lib/slab-code/cache \
+    XDG_DATA_HOME=/var/lib/slab-code/data
+
+USER slab-runner
+
+VOLUME ["/var/lib/slab-runner/codex", "/var/lib/slab-code"]
+EXPOSE 6990
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:6990/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
+CMD ["node", "dist/cli.js", "start"]
+
 FROM node:22-bookworm-slim AS runtime
 
 ARG CODEX_VERSION=0.148.0

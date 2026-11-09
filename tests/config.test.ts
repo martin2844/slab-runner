@@ -107,4 +107,35 @@ describe("loadConfig", () => {
       loadConfig({ RUNNER_TOKEN_FILE: tokenFile("short\n") }),
     ).toThrow(/at least 16 characters/);
   });
+
+  it("defaults to the agent profile without a run limit", () => {
+    expect(loadConfig({})).toMatchObject({
+      profile: "agent",
+      maxActiveRuns: null,
+      gitAllowFileRemotes: false,
+    });
+    expect(loadConfig({}).codeRoot).toContain("slab-runner/code");
+    expect(loadConfig({ RUNNER_MAX_ACTIVE_RUNS: "3" }).maxActiveRuns).toBe(3);
+  });
+
+  it("configures the code profile", () => {
+    expect(
+      loadConfig({
+        RUNNER_PROFILE: "code",
+        RUNNER_CODE_ROOT: "/var/lib/slab-code",
+        RUNNER_GIT_ALLOW_FILE_REMOTES: "1",
+      }),
+    ).toMatchObject({
+      profile: "code",
+      codeRoot: "/var/lib/slab-code",
+      maxActiveRuns: 2,
+      gitAllowFileRemotes: true,
+    });
+    expect(
+      loadConfig({ RUNNER_PROFILE: "code", RUNNER_MAX_ACTIVE_RUNS: "5" })
+        .maxActiveRuns,
+    ).toBe(5);
+    expect(() => loadConfig({ RUNNER_PROFILE: "other" })).toThrow();
+    expect(() => loadConfig({ RUNNER_MAX_ACTIVE_RUNS: "0" })).toThrow();
+  });
 });

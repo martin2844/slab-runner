@@ -16,19 +16,35 @@ export const runnerErrorCodes = [
   "RUN_HISTORY_EXPIRED",
   "RUN_INTERRUPTED",
   "INVALID_REQUEST",
+  "RUN_TIME_LIMIT",
+  "RUNNER_AT_CAPACITY",
+  "PROFILE_NOT_ENABLED",
+  "RUNTIME_UNSUPPORTED_FOR_PROFILE",
+  "WORKSPACE_NOT_FOUND",
+  "WORKSPACE_NOT_READY",
+  "WORKSPACE_BUSY",
+  "WORKSPACE_REQUIRED",
+  "WORKSPACE_STATE_MISMATCH",
+  "HANDOFF_NOT_FOUND",
+  "PUBLISH_POLICY_VIOLATION",
+  "GIT_PUSH_FAILED",
 ] as const;
 
 export type RunnerErrorCode = (typeof runnerErrorCodes)[number];
 
 export class RunnerError extends Error {
+  /** Optional structured details returned by the HTTP API (never in events). */
+  readonly details?: unknown;
+
   constructor(
     readonly code: RunnerErrorCode,
     message: string,
     readonly httpStatus = 500,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { details?: unknown },
   ) {
     super(message, options);
     this.name = "RunnerError";
+    if (options?.details !== undefined) this.details = options.details;
   }
 }
 

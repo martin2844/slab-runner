@@ -101,8 +101,10 @@ GET /health
 ```
 
 ```json
-{ "status": "ok" }
+{ "status": "ok", "profile": "agent" }
 ```
+
+`profile` is `agent` (default) or `code` (see [Code profile](#code-profile)).
 
 ### Runtime availability
 
@@ -347,6 +349,85 @@ Runtime error codes include:
 - `RUN_CANCELLED`
 - `APPROVAL_FAILED`
 - `UNKNOWN_RUNTIME_ERROR`
+- `RUN_TIME_LIMIT` (wall-clock limit reached; terminal `run.failed`)
+
+## Code profile
+
+With `RUNNER_PROFILE=code` the Runner becomes a coding sandbox: Codex works on
+per-task git checkouts ("workspaces") without per-command approvals, because the
+container itself is the sandbox. Build the image with
+`docker build --target code .` (a plain `docker build .` still produces the
+default runtime image). The full HTTP contract is in
+[`docs/plans/code-runner-contract.md`](docs/plans/code-runner-contract.md).
+
+| Variable                        | Default                                                              | Description                                                                 |
+| ------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `RUNNER_PROFILE`                | `agent`                                                              | `code` enables workspaces and workspace runs                                |
+| `RUNNER_CODE_ROOT`              | `~/.local/state/slab-runner/code` (`/var/lib/slab-code` in the image) | Root for `workspaces/<id>/{repo,handoff,workspace.json}`                    |
+| `RUNNER_MAX_ACTIVE_RUNS`        | `2` in the code profile, unlimited in the agent profile              | Concurrent active runs (any profile); over the limit → `429 RUNNER_AT_CAPACITY` |
+| `RUNNER_GIT_ALLOW_FILE_REMOTES` | unset                                                                | `1` allows `file://` clone/push URLs (tests and local development only)     |
+
+Endpoints (all require the runner token):
+
+| Method and path                         | Result                                                        |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `POST /workspaces`                      | `202 { data: Workspace }` (`200` with the existing one for a known id) |
+| `GET /workspaces`                       | `{ data: Workspace[] }`                                        |
+| `GET /workspaces/:id`                   | `{ data: Workspace }` or `404 WORKSPACE_NOT_FOUND`             |
+| `DELETE /workspaces/:id`                | Cancels an active run, removes the directory; idempotent        |
+| `GET /workspaces/:id/handoff`           | `{ data: [{ name, size, updatedAt }] }`                        |
+| `GET`/`PUT /workspaces/:id/handoff/:name` | Read or write a UTF-8 stage file (≤ 2 MB, `^[a-z0-9][a-z0-9._-]{0,80}$`) |
+| `GET /workspaces/:id/diff`              | Diff of `baseSha` against the working tree, untracked files included |
+| `POST /workspaces/:id/publish`          | Body `{ branch, baseSha, pushToken, remoteUrl, commitMessage?, forbiddenPaths? }`: commit pending changes, check every commit against forbidden paths, force-push `refs/heads/<branch>` |
+
+In the agent profile every `/workspaces` path answers `404 PROFILE_NOT_ENABLED`
+and a run with `workspace` answers `400 PROFILE_NOT_ENABLED`.
+
+Preparation is asynchronous: `POST /workspaces` returns `preparing`; the
+workspace becomes `ready` after the clone **and** the setup command finished
+(a failed setup still yields `ready` with `setup.status = "failed"`), or
+`failed` when the clone fails. Workspace metadata is persisted in
+`workspace.json`; after a restart, `preparing` workspaces become `failed` (or
+`ready` with a failed setup if the clone had finished) and `busy` ones become
+`ready`.
+
+In the code profile every run must carry `workspace: { id }` (with `cwd: null`;
+plain runs → `400 WORKSPACE_REQUIRED`). Runs accept `limits: { wallClockSeconds }`
+(default 3600, max 14400; the default applies to workspace runs only). Only the
+`codex` runtime is supported (`400 RUNTIME_UNSUPPORTED_FOR_PROFILE`). The run
+holds the workspace lock until its terminal event (`409 WORKSPACE_BUSY` /
+`409 WORKSPACE_NOT_READY` otherwise). Codex runs with `cwd` set to the
+checkout, `approvalPolicy: "never"`, `sandbox: "danger-full-access"` and an
+extra developer-instructions block; MCP approval policies are unchanged.
+
+The agent runs with the Runner's uid, so everything under `RUNNER_CODE_ROOT`
+(including each `.git` and `workspace.json`) is treated as agent-controlled:
+
+- Git credentials (`fetchToken`, `pushToken`) reach git only through a
+  credential helper defined on the command line that reads the token from the
+  git child's environment (`GIT_TERMINAL_PROMPT=0`); no on-disk script is
+  executed with a credential. Tokens are never written to disk, metadata, or
+  logs and are stripped from error messages.
+- Publishing commits pending changes in the checkout without credentials or
+  hooks, then fetches the result into a fresh temporary bare repository. The
+  forbidden-path check (every commit in `baseSha..HEAD`, default
+  `.github/workflows/` and `.gitmodules`) and the push run only there. The
+  request must carry the expected `branch` and `baseSha`
+  (`409 WORKSPACE_STATE_MISMATCH` otherwise); `workspace.json` is re-validated
+  on restart.
+- All runner git commands use `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_NO_REPLACE_OBJECTS=1`, no inherited
+  `GIT_*` variables and `core.hooksPath=/dev/null`.
+- Handoff files are read only if they are regular, singly-linked files inside a
+  real (non-symlink) handoff directory.
+- On Linux, processes left inside a workspace are killed when a run ends, after
+  setup, and before diff and publish.
+
+Additional error codes: `PROFILE_NOT_ENABLED`, `RUNTIME_UNSUPPORTED_FOR_PROFILE`,
+`RUNNER_AT_CAPACITY`, `WORKSPACE_NOT_FOUND`, `WORKSPACE_NOT_READY`,
+`WORKSPACE_BUSY`, `WORKSPACE_REQUIRED`, `WORKSPACE_STATE_MISMATCH` (409),
+`HANDOFF_NOT_FOUND`, `PUBLISH_POLICY_VIOLATION` (422, with
+`details`: offending paths), `GIT_PUSH_FAILED` (502).
 
 ## Codex lifecycle
 

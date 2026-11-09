@@ -5,6 +5,9 @@ import { z } from "zod";
 
 const runnerHosts = ["127.0.0.1", "::1", "localhost", "0.0.0.0"] as const;
 const loopbackHosts = new Set<string>(["127.0.0.1", "::1", "localhost"]);
+export const runnerProfiles = ["agent", "code"] as const;
+export type RunnerProfile = (typeof runnerProfiles)[number];
+const DEFAULT_CODE_PROFILE_MAX_ACTIVE_RUNS = 2;
 
 const envSchema = z
   .object({
@@ -16,6 +19,13 @@ const envSchema = z
     RUNNER_GEMINI_HOME: z.string().trim().min(1).optional(),
     RUNNER_TOKEN: z.string().min(16).optional(),
     RUNNER_TOKEN_FILE: z.string().trim().min(1).optional(),
+    RUNNER_PROFILE: z.enum(runnerProfiles).default("agent"),
+    RUNNER_CODE_ROOT: z.string().trim().min(1).optional(),
+    RUNNER_MAX_ACTIVE_RUNS: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.coerce.number().int().min(1).max(1_000).optional(),
+    ),
+    RUNNER_GIT_ALLOW_FILE_REMOTES: z.string().trim().optional(),
   })
   .superRefine((value, context) => {
     if (value.RUNNER_TOKEN && value.RUNNER_TOKEN_FILE) {
@@ -38,6 +48,12 @@ export interface RunnerConfig {
   runnerToken?: string;
   safeCwd: string;
   runJournalFile: string;
+  profile: RunnerProfile;
+  /** Root for code-profile workspaces. Only created when profile is `code`. */
+  codeRoot: string;
+  /** Concurrent active runs; `null` means unlimited. */
+  maxActiveRuns: number | null;
+  gitAllowFileRemotes: boolean;
 }
 
 function readRunnerToken(filename: string): string {
@@ -83,5 +99,17 @@ export function loadConfig(
     ...(runnerToken ? { runnerToken } : {}),
     safeCwd,
     runJournalFile: join(codexHome, "run-journal.jsonl"),
+    profile: parsed.RUNNER_PROFILE,
+    codeRoot: parsed.RUNNER_CODE_ROOT
+      ? resolve(parsed.RUNNER_CODE_ROOT)
+      : join(homedir(), ".local", "state", "slab-runner", "code"),
+    maxActiveRuns:
+      parsed.RUNNER_MAX_ACTIVE_RUNS ??
+      (parsed.RUNNER_PROFILE === "code"
+        ? DEFAULT_CODE_PROFILE_MAX_ACTIVE_RUNS
+        : null),
+    gitAllowFileRemotes: ["1", "true"].includes(
+      parsed.RUNNER_GIT_ALLOW_FILE_REMOTES?.toLowerCase() ?? "",
+    ),
   };
 }

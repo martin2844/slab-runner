@@ -8,6 +8,10 @@ export class Redactor {
     if (value && value.length >= 4) this.#secrets.add(value);
   }
 
+  remove(value: string | undefined): void {
+    if (value) this.#secrets.delete(value);
+  }
+
   addHeaders(headers: Record<string, string>): void {
     for (const [name, value] of Object.entries(headers)) {
       if (SECRET_KEY.test(name)) {
