@@ -36,7 +36,8 @@ export function prepareIsolatedCodexHome({
   if (existsSync(targetHome)) {
     const entries = readdirSync(targetHome);
     const managedConfig = existsSync(targetConfig)
-      ? readFileSync(targetConfig, "utf8").startsWith(managedConfigHeader[0]!)
+      ? // Codex adds entries (project trust) above the header, so look for it anywhere.
+        readFileSync(targetConfig, "utf8").includes(managedConfigHeader[0]!)
       : false;
     if (entries.length > 0 && !managedConfig) {
       throw new Error(

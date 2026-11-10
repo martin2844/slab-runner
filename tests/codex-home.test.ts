@@ -51,6 +51,23 @@ describe("prepareIsolatedCodexHome", () => {
     expect(config).not.toContain("localhost:6969");
   });
 
+  it("restarts after Codex added project trust above the managed header", () => {
+    const primaryHome = temporaryDirectory("slab-runner-primary-codex-");
+    const runnerHome = temporaryDirectory("slab-runner-isolated-codex-");
+    const sourceAuth = join(primaryHome, "auth.json");
+    writeFileSync(sourceAuth, "{}", { mode: 0o600 });
+    prepareIsolatedCodexHome({ codexHome: runnerHome, authSourceFile: sourceAuth });
+    const managed = readFileSync(join(runnerHome, "config.toml"), "utf8");
+    writeFileSync(
+      join(runnerHome, "config.toml"),
+      `[projects."/var/lib/slab-code/workspaces/run/repo"]\ntrust_level = "trusted"\n${managed}`,
+    );
+
+    expect(() =>
+      prepareIsolatedCodexHome({ codexHome: runnerHome, authSourceFile: sourceAuth }),
+    ).not.toThrow();
+  });
+
   it("preserves authentication already refreshed inside the runner home", () => {
     const primaryHome = temporaryDirectory("slab-runner-primary-codex-");
     const runnerHome = temporaryDirectory("slab-runner-isolated-codex-");
