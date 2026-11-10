@@ -14,7 +14,7 @@ RUN npm run build && npm prune --omit=dev
 # Build with `docker build --target code .`. The container is the sandbox.
 # This stage sits before `runtime` so a plain `docker build .` still produces
 # the default runtime image.
-FROM node:22-bookworm AS code
+FROM node:22-trixie AS code
 
 ARG CODEX_VERSION=0.148.0
 
@@ -34,6 +34,30 @@ RUN apt-get update \
     python3-pip \
     python3-venv \
     ripgrep \
+    unzip \
+    zip \
+    # Media and headless desktop tests: FFmpeg, a virtual display, audio, and the
+    # shared libraries Electron needs. Release builds and signing stay off this host.
+    ffmpeg \
+    pulseaudio \
+    pulseaudio-utils \
+    xauth \
+    xvfb \
+    fonts-liberation \
+    libasound2t64 \
+    libatk-bridge2.0-0t64 \
+    libatk1.0-0t64 \
+    libcups2t64 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0t64 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxkbcommon0 \
+    libxrandr2 \
+    libxshmfence1 \
+    libxss1 \
   && rm -rf /var/lib/apt/lists/* \
   && npm install --global "@openai/codex@${CODEX_VERSION}" \
   && npm cache clean --force \
@@ -57,6 +81,9 @@ ENV NODE_ENV=production \
     RUNNER_CODE_ROOT=/var/lib/slab-code \
     RUNNER_CODEX_HOME=/var/lib/slab-runner/codex \
     CODEX_BIN=/usr/local/bin/codex \
+    # NODE_ENV=production is for the runner itself; checkouts still need devDependencies
+    # (test runners, Electron) when an agent runs npm ci.
+    npm_config_include=dev \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     COREPACK_HOME=/var/lib/slab-code/cache/corepack \
     npm_config_cache=/var/lib/slab-code/cache/npm \
